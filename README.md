@@ -5,6 +5,11 @@ S-hull: a fast sweep-hull routine for Delaunay triangulation by David Sinclair
 
 Principally based on the pure Python implementation in [pyhull](https://github.com/TimSC/pyshull).
 
+## TODOs
+- [x] implementation for the 2d case
+- [ ] generalize from 2 to N dimensions
+- [ ] improve performance: the expectation is to be ~2X faster than scipy's Qhull-based Delaunay but currently we're about even
+
 ## Build
 1. `cd` into directory
 2. Activate virtual environment: `source .venv/bin/activate`
