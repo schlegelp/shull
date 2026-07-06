@@ -691,7 +691,11 @@ fn check_hull(hull: &[Tet], flags: &[u8]) -> Result<(), DelaunayError> {
 }
 
 /// Extract the lower-hull facets (the Delaunay tetrahedra), remap vertex ids
-/// to the caller's original point order and orient them positively.
+/// to the caller's original point order and orient them positively. Also
+/// extracts the tetrahedron adjacency from the hull's facet links:
+/// `neighbors[t][j]` is the tetrahedron across the ridge opposite vertex j
+/// of tetrahedron t (scipy's convention), -1 where the neighboring hull
+/// facet is not itself a Delaunay tetrahedron (the hull boundary).
 ///
 /// The lower-hull test and the orientation are decided with the exact
 /// `orient3d` predicate: the canonical normal's w component is
@@ -704,8 +708,10 @@ fn compact_output(
     hull: &[Tet],
     flags: &[u8],
     orig: &[u32],
-) -> Vec<[u32; 4]> {
-    let mut tets = Vec::new();
+) -> (Vec<[u32; 4]>, Vec<[i32; 4]>) {
+    // Pass 1: pick the lower-hull facets and assign their output ids.
+    let mut out_id: Vec<u32> = vec![NONE; hull.len()];
+    let mut kept: Vec<(u32, bool)> = Vec::new(); // (hull facet id, swap v0/v1)
     for (h, t) in hull.iter().enumerate() {
         if flags[h] & F_STATE == F_DEAD {
             continue;
@@ -724,9 +730,29 @@ fn compact_output(
         if !lower {
             continue; // upper hull facet or degenerate (o == 0) sliver
         }
+        out_id[h] = kept.len() as u32;
+        // Swapping v0/v1 makes det[v1-v0; v2-v0; v3-v0] positive.
+        kept.push((h as u32, o < 0.0));
+    }
+
+    // Pass 2: emit vertices and neighbors. `Tet.n[j]` is the facet across
+    // the ridge opposite `v[j]`, so the slot layout already matches the
+    // vertex layout; a v0/v1 swap therefore swaps n0/n1 too.
+    let mut tets = Vec::with_capacity(kept.len());
+    let mut neighbors = Vec::with_capacity(kept.len());
+    for &(h, swap) in &kept {
+        let t = &hull[h as usize];
         let mut v = t.v;
-        if o < 0.0 {
-            v.swap(0, 1); // make det[v1-v0; v2-v0; v3-v0] positive
+        let mut nb = t.n.map(|m| {
+            if m == NONE || out_id[m as usize] == NONE {
+                -1
+            } else {
+                out_id[m as usize] as i32
+            }
+        });
+        if swap {
+            v.swap(0, 1);
+            nb.swap(0, 1);
         }
         tets.push([
             orig[v[0] as usize],
@@ -734,8 +760,9 @@ fn compact_output(
             orig[v[2] as usize],
             orig[v[3] as usize],
         ]);
+        neighbors.push(nb);
     }
-    tets
+    (tets, neighbors)
 }
 
 /// Compute the 3D Delaunay tetrahedralization of `points` (an (n, 3) array
@@ -743,11 +770,13 @@ fn compact_output(
 /// identical to converting the input up front).
 ///
 /// Returns tetrahedra as indices into the caller's point array, positively
-/// oriented. Exact duplicate points are dropped (their indices never appear
-/// in the output).
+/// oriented, plus their adjacency: `neighbors[t][j]` is the tetrahedron
+/// across the ridge opposite vertex j of tetrahedron t (scipy's convention),
+/// -1 on the hull boundary. Exact duplicate points are dropped (their
+/// indices never appear in the output).
 pub fn delaunay4d<T: Copy + Into<f64>>(
     points: ArrayView2<T>,
-) -> Result<Vec<[u32; 4]>, DelaunayError> {
+) -> Result<(Vec<[u32; 4]>, Vec<[i32; 4]>), DelaunayError> {
     assert_eq!(points.ncols(), 3, "input points must be 3D");
     if points.nrows() >= NONE as usize {
         return Err(DelaunayError::Degenerate(format!(
@@ -1031,7 +1060,7 @@ mod tests {
             [0.0, 0.0, 1.0],
             [0.2, 0.2, 0.2],
         ];
-        let tets = delaunay4d(to_array(&points).view()).unwrap();
+        let (tets, _) = delaunay4d(to_array(&points).view()).unwrap();
         assert_eq!(tets.len(), 4);
         assert_delaunay(&points, &tets);
         // Every tet must contain the interior point (index 4).
@@ -1044,7 +1073,7 @@ mod tests {
     fn random_points_are_delaunay() {
         for seed in [1, 2, 3] {
             let points = pseudo_random_points(80, seed);
-            let tets = delaunay4d(to_array(&points).view()).unwrap();
+            let (tets, _) = delaunay4d(to_array(&points).view()).unwrap();
             assert!(!tets.is_empty());
             assert_delaunay(&points, &tets);
             for tet in &tets {
@@ -1062,11 +1091,44 @@ mod tests {
         let mut points = pseudo_random_points(40, 7);
         points.push(points[0]);
         points.push(points[10]);
-        let tets = delaunay4d(to_array(&points).view()).unwrap();
+        let (tets, _) = delaunay4d(to_array(&points).view()).unwrap();
         assert_delaunay(&points[..40], &tets);
         for tet in &tets {
             assert!(!tet.contains(&40) && !tet.contains(&41));
         }
+    }
+
+    #[test]
+    fn neighbors_are_mutual_and_share_ridges() {
+        let points = pseudo_random_points(150, 21);
+        let (tets, nbrs) = delaunay4d(to_array(&points).view()).unwrap();
+        assert_eq!(tets.len(), nbrs.len());
+        let mut boundary = 0;
+        for (t, nb) in nbrs.iter().enumerate() {
+            for j in 0..4 {
+                if nb[j] < 0 {
+                    boundary += 1;
+                    continue;
+                }
+                let k = nb[j] as usize;
+                // The ridge opposite vertex j is shared; vertex j itself is not.
+                for (jj, v) in tets[t].iter().enumerate() {
+                    assert_eq!(tets[k].contains(v), jj != j);
+                }
+                assert!(nbrs[k].contains(&(t as i32)), "adjacency is not mutual");
+            }
+        }
+        // Exactly the hull triangles (faces in only one tet) have no neighbor.
+        let mut face_count = std::collections::HashMap::new();
+        for t in &tets {
+            for j in 0..4 {
+                let mut f: Vec<u32> = (0..4).filter(|&k| k != j).map(|k| t[k]).collect();
+                f.sort_unstable();
+                *face_count.entry((f[0], f[1], f[2])).or_insert(0) += 1;
+            }
+        }
+        let hull_faces = face_count.values().filter(|&&c| c == 1).count();
+        assert_eq!(boundary, hull_faces);
     }
 
     #[test]
@@ -1077,7 +1139,7 @@ mod tests {
             .collect();
         match delaunay4d(to_array(&points).view()) {
             Err(DelaunayError::Degenerate(_)) => {}
-            other => panic!("expected Degenerate error, got {:?}", other.map(|t| t.len())),
+            other => panic!("expected Degenerate error, got {:?}", other.map(|t| t.0.len())),
         }
     }
 
@@ -1086,7 +1148,7 @@ mod tests {
         let points = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
         match delaunay4d(to_array(&points).view()) {
             Err(DelaunayError::TooFewPoints(3)) => {}
-            other => panic!("expected TooFewPoints, got {:?}", other.map(|t| t.len())),
+            other => panic!("expected TooFewPoints, got {:?}", other.map(|t| t.0.len())),
         }
     }
 
@@ -1101,7 +1163,7 @@ mod tests {
                 }
             }
         }
-        let tets = delaunay4d(to_array(&points).view()).unwrap();
+        let (tets, _) = delaunay4d(to_array(&points).view()).unwrap();
         // The union of tets must tile the cube: total volume = 27; and no
         // inverted or degenerate tets.
         let mut total = 0.0;
@@ -1123,7 +1185,7 @@ mod tests {
         let arr64 = arr32.mapv(|v| v as f64);
         let t32 = delaunay4d(arr32.view()).unwrap();
         let t64 = delaunay4d(arr64.view()).unwrap();
-        assert!(!t32.is_empty());
+        assert!(!t32.0.is_empty());
         assert_eq!(t32, t64);
     }
 
@@ -1147,7 +1209,7 @@ mod tests {
                 next() * 1e-6 + off,
             ]);
         }
-        let tets = delaunay4d(to_array(&points).view()).unwrap();
+        let (tets, _) = delaunay4d(to_array(&points).view()).unwrap();
         assert!(!tets.is_empty());
         // All 400 points must appear as vertices.
         let mut seen = vec![false; 400];

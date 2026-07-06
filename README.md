@@ -27,6 +27,7 @@ where plain floating point corrupts the result.
 - [x] generalize from 2 to N dimensions: 3D Delaunay (tetrahedra) via 4D sweep-hull
 - [x] improve 2d performance: ~10X faster than scipy's Qhull-based Delaunay
 - [x] improve 3d performance: ~3–5.5X faster than scipy
+- [x] scipy-compatible API: `neighbors`, `convex_hull`, `vertex_neighbor_vertices`, `transform`, `find_simplex`, …
 
 ## Build
 1. `cd` into directory
@@ -74,18 +75,45 @@ array([[5790, 4665, 8764],
        ...,
        [2821, 8418, 1189],
        [1500, 9364, 8681],
-       [5462, 1500, 8681]], dtype=uint64)
+       [5462, 1500, 8681]], dtype=int32)
 ```
 
 ### 3D
 
 ```python
 >>> pts = np.random.default_rng(12345).random((10000, 3))
->>> d = shull.Delaunay3d(pts)
->>> d.simplices          # (n, 4) tetrahedra, like scipy.spatial.Delaunay
+>>> d = shull.Delaunay(pts)  # dispatches on the number of columns;
+>>> d.simplices              # Delaunay3d is kept as an explicit alias
 array([[3661, 6693, 7492, 1937],
-       ...], dtype=uint64)
+       ...], dtype=int32)
 ```
+
+### scipy compatibility
+
+`shull.Delaunay` aims to be a drop-in replacement for
+`scipy.spatial.Delaunay`. Beyond `points` and `simplices` (int32, like
+scipy) it provides the derived structures. `neighbors` comes straight out
+of the triangulation (the hull construction maintains facet adjacency
+anyway, so exporting it is essentially free, like qhull) and
+`vertex_neighbor_vertices` is built in Rust on first access (~2x faster
+than scipy's); the rest are computed lazily in numpy and cached:
+
+- `neighbors` — neighboring simplex opposite each vertex, -1 at the boundary
+- `convex_hull` — facets of the convex hull
+- `vertex_to_simplex` — a simplex containing each vertex
+- `vertex_neighbor_vertices` — CSR `(indptr, indices)` vertex adjacency
+- `coplanar` — points not in the triangulation (dropped exact duplicates)
+- `transform` — barycentric transforms, same layout as scipy
+- `find_simplex(xi, bruteforce=False, tol=None)` — point location via a
+  vectorized visibility walk (brute force as option/fallback)
+- `npoints`, `nsimplex`, `ndim`, `min_bound`, `max_bound`, `furthest_site`,
+  `close()`
+
+Not implemented: `equations` (and `paraboloid_scale`/`paraboloid_shift`,
+`plane_distance`, `lift_points`), incremental mode (`add_points`),
+`furthest_site=True` and `qhull_options` — the constructor accepts scipy's
+keyword arguments but raises `NotImplementedError` for non-default values.
+Unlike scipy, float32 `points` are kept as float32 (see below).
 
 Notes (both dimensions):
 - Output simplices are positively oriented (counterclockwise triangles in 2D,

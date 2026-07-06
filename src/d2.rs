@@ -205,10 +205,13 @@ impl Triangulator {
 /// or f32 coordinates; f32 widens to f64 exactly).
 ///
 /// Returns counterclockwise triangles as indices into the caller's point
-/// array. Exact duplicate points are dropped (one representative is kept).
+/// array, plus the triangle adjacency: `neighbors[t][j]` is the triangle
+/// across the edge opposite vertex j of triangle t (scipy's convention),
+/// -1 on the hull. Exact duplicate points are dropped (one representative
+/// is kept).
 pub fn delaunay2d<T: Copy + Into<f64>>(
     points: ArrayView2<T>,
-) -> Result<Vec<[u32; 3]>, DelaunayError> {
+) -> Result<(Vec<[u32; 3]>, Vec<[i32; 3]>), DelaunayError> {
     assert_eq!(points.ncols(), 2, "input points must be 2D");
     let n = points.nrows();
     if n >= EMPTY as usize {
@@ -419,11 +422,24 @@ pub fn delaunay2d<T: Copy + Into<f64>>(
         tr.hull_hash[key] = e;
     }
 
-    Ok(tr
+    // Halfedge 3t + k runs from the vertex at position k to the one at
+    // position (k+1)%3, so the edge opposite vertex position j is halfedge
+    // 3t + (j+1)%3; its twin's triangle is the neighbor opposite vertex j.
+    let neighbors = (0..tr.triangles.len() / 3)
+        .map(|t| {
+            [1, 2, 0].map(|k| match tr.halfedges[3 * t + k] {
+                EMPTY => -1,
+                twin => (twin / 3) as i32,
+            })
+        })
+        .collect();
+
+    let triangles = tr
         .triangles
         .chunks_exact(3)
         .map(|t| [t[0], t[1], t[2]])
-        .collect())
+        .collect();
+    Ok((triangles, neighbors))
 }
 
 #[cfg(test)]
@@ -507,7 +523,7 @@ mod tests {
     fn random_points_are_delaunay() {
         for seed in [1, 2, 3] {
             let points = pseudo_random_points(120, seed);
-            let tris = delaunay2d(to_array(&points).view()).unwrap();
+            let (tris, _) = delaunay2d(to_array(&points).view()).unwrap();
             assert!(!tris.is_empty());
             assert_delaunay(&points, &tris);
             // Every point must appear (no drops on distinct inputs).
@@ -525,7 +541,7 @@ mod tests {
     fn triangle_count_matches_euler() {
         // For n points with h on the hull: triangles = 2n - h - 2.
         let points = pseudo_random_points(500, 4);
-        let tris = delaunay2d(to_array(&points).view()).unwrap();
+        let (tris, _) = delaunay2d(to_array(&points).view()).unwrap();
         // Count hull edges: edges that appear in only one triangle.
         let mut edge_count = std::collections::HashMap::new();
         for t in &tris {
@@ -539,6 +555,38 @@ mod tests {
     }
 
     #[test]
+    fn neighbors_are_mutual_and_share_edges() {
+        let points = pseudo_random_points(200, 11);
+        let (tris, nbrs) = delaunay2d(to_array(&points).view()).unwrap();
+        assert_eq!(tris.len(), nbrs.len());
+        let mut boundary = 0;
+        for (t, nb) in nbrs.iter().enumerate() {
+            for j in 0..3 {
+                if nb[j] < 0 {
+                    boundary += 1;
+                    continue;
+                }
+                let k = nb[j] as usize;
+                // The edge opposite vertex j is shared; vertex j itself is not.
+                for (jj, v) in tris[t].iter().enumerate() {
+                    assert_eq!(tris[k].contains(v), jj != j);
+                }
+                assert!(nbrs[k].contains(&(t as i32)), "adjacency is not mutual");
+            }
+        }
+        // Exactly the hull edges (edges in only one triangle) have no neighbor.
+        let mut edge_count = std::collections::HashMap::new();
+        for t in &tris {
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                *edge_count.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+            }
+        }
+        let hull_edges = edge_count.values().filter(|&&c| c == 1).count();
+        assert_eq!(boundary, hull_edges);
+    }
+
+    #[test]
     fn grid_points_triangulate() {
         // Cocircular quads everywhere: exercises exact-cocircular ties.
         let mut points = Vec::new();
@@ -547,7 +595,7 @@ mod tests {
                 points.push([x as f64, y as f64]);
             }
         }
-        let tris = delaunay2d(to_array(&points).view()).unwrap();
+        let (tris, _) = delaunay2d(to_array(&points).view()).unwrap();
         assert_eq!(tris.len(), 2 * 29 * 29); // grid area tiled by half-squares
         let total: f64 = tris
             .iter()
@@ -567,7 +615,7 @@ mod tests {
         let mut points = pseudo_random_points(50, 7);
         points.push(points[3]);
         points.push(points[20]);
-        let tris = delaunay2d(to_array(&points).view()).unwrap();
+        let (tris, _) = delaunay2d(to_array(&points).view()).unwrap();
         assert_delaunay(&points[..50], &tris);
         let used: std::collections::HashSet<u32> =
             tris.iter().flatten().copied().collect();
@@ -581,7 +629,7 @@ mod tests {
         let points: Vec<[f64; 2]> = (0..40).map(|i| [i as f64, 2.0 * i as f64]).collect();
         match delaunay2d(to_array(&points).view()) {
             Err(DelaunayError::Degenerate(_)) => {}
-            other => panic!("expected Degenerate, got {:?}", other.map(|t| t.len())),
+            other => panic!("expected Degenerate, got {:?}", other.map(|t| t.0.len())),
         }
     }
 
@@ -590,7 +638,7 @@ mod tests {
         let points = [[0.0, 0.0], [1.0, 1.0]];
         match delaunay2d(to_array(&points).view()) {
             Err(DelaunayError::TooFewPoints(_)) => {}
-            other => panic!("expected TooFewPoints, got {:?}", other.map(|t| t.len())),
+            other => panic!("expected TooFewPoints, got {:?}", other.map(|t| t.0.len())),
         }
     }
 
@@ -622,7 +670,7 @@ mod tests {
                 [next() * 1e-6 + off, next() * 1e-6 + off]
             })
             .collect();
-        let tris = delaunay2d(to_array(&points).view()).unwrap();
+        let (tris, _) = delaunay2d(to_array(&points).view()).unwrap();
         let mut seen = vec![false; 400];
         for t in &tris {
             for &v in t {
