@@ -11,8 +11,10 @@ in-circle edge flipping to restore the Delaunay condition.
 The 3D case generalizes Sinclair's _Newton Apple Wrapper_ sweep-hull algorithm
 ([arXiv 1602.04707](https://arxiv.org/abs/1602.04707)) one dimension up: points
 are lifted onto a 4D paraboloid (`w = x² + y² + z²`), the 4D convex hull is
-computed by sorted incremental insertion, and the downward-facing facets are
-exactly the Delaunay tetrahedra.
+computed by incremental insertion along a Morton (Z-order) space-filling curve
+— every lifted point is extreme on the paraboloid, so any insertion order is
+valid, and the spatially local one keeps the hull walk cache-hot — and the
+downward-facing facets are exactly the Delaunay tetrahedra.
 
 In both cases all combinatorial decisions (visibility, in-circle/in-sphere
 tests) fall back to Shewchuk's exact adaptive predicates (the
@@ -23,8 +25,8 @@ where plain floating point corrupts the result.
 ## TODOs
 - [x] implementation for the 2d case
 - [x] generalize from 2 to N dimensions: 3D Delaunay (tetrahedra) via 4D sweep-hull
-- [x] improve 2d performance: ~9.5X faster than scipy's Qhull-based Delaunay
-- [x] improve 3d performance: ~1.4–1.8X faster than scipy
+- [x] improve 2d performance: ~10X faster than scipy's Qhull-based Delaunay
+- [x] improve 3d performance: ~3–5.5X faster than scipy
 
 ## Build
 1. `cd` into directory
@@ -44,17 +46,17 @@ Benchmark on an Apple-silicon laptop (random uniform points, release build):
 
 | n | shull | scipy (Qhull) | speedup |
 |-----------|--------|--------|-------|
-| 10 000 | 0.002 s | 0.015 s | 9.5× |
-| 100 000 | 0.021 s | 0.20 s | 9.4× |
-| 1 000 000 | 0.35 s | 3.4 s | 9.7× |
+| 10 000 | 0.002 s | 0.018 s | 9.8× |
+| 100 000 | 0.029 s | 0.30 s | 10.7× |
+| 1 000 000 | 0.46 s | 5.0 s | 10.9× |
 
 **3D** (`Delaunay3d` vs `scipy.spatial.Delaunay`)
 
 | n | shull | scipy (Qhull) | speedup |
 |-----------|--------|--------|-------|
-| 10 000 | 0.05 s | 0.07 s | 1.4× |
-| 100 000 | 0.66 s | 1.19 s | 1.8× |
-| 1 000 000 | 8.5 s | 14.7 s | 1.7× |
+| 10 000 | 0.031 s | 0.098 s | 3.2× |
+| 100 000 | 0.32 s | 1.69 s | 5.3× |
+| 1 000 000 | 3.8 s | 20.8 s | 5.5× |
 
 ## Usage
 

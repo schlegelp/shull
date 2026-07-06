@@ -24,7 +24,7 @@ fn to_pyarray<'py, const K: usize>(
     indices.into_pyarray(py)
 }
 
-fn shull_2d_impl<'py, T: Copy + Into<f64> + numpy::Element>(
+fn shull_2d_impl<'py, T: Copy + Into<f64> + numpy::Element + Send>(
     py: Python<'py>,
     points: PyReadonlyArray2<T>,
 ) -> PyResult<&'py PyArray2<u64>> {
@@ -32,11 +32,17 @@ fn shull_2d_impl<'py, T: Copy + Into<f64> + numpy::Element>(
     if points.ncols() != 2 {
         return Err(PyValueError::new_err("input points must have shape (n, 2)"));
     }
-    let tris = d2::delaunay2d(points).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    // Snapshot the coordinates so the triangulation can run with the GIL
+    // released: other Python threads may mutate the input buffer once the
+    // GIL is dropped.
+    let points = points.to_owned();
+    let tris = py
+        .allow_threads(move || d2::delaunay2d(points.view()))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(to_pyarray(py, tris))
 }
 
-fn shull_3d_impl<'py, T: Copy + Into<f64> + numpy::Element>(
+fn shull_3d_impl<'py, T: Copy + Into<f64> + numpy::Element + Send>(
     py: Python<'py>,
     points: PyReadonlyArray2<T>,
 ) -> PyResult<&'py PyArray2<u64>> {
@@ -44,7 +50,11 @@ fn shull_3d_impl<'py, T: Copy + Into<f64> + numpy::Element>(
     if points.ncols() != 3 {
         return Err(PyValueError::new_err("input points must have shape (n, 3)"));
     }
-    let tets = d4::delaunay4d(points).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    // See shull_2d_impl for why the input is copied before releasing the GIL.
+    let points = points.to_owned();
+    let tets = py
+        .allow_threads(move || d4::delaunay4d(points.view()))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(to_pyarray(py, tets))
 }
 
@@ -77,8 +87,9 @@ pub fn calculate_shull_2d_f32<'py>(
 ///
 /// Uses the sweep-hull ("Newton Apple Wrapper") algorithm of David Sinclair
 /// (arXiv 1602.04707) generalized to 4D: points are lifted onto a 4D
-/// paraboloid, the 4D convex hull is computed by sorted incremental
-/// insertion, and the downward-facing facets are the Delaunay tetrahedra.
+/// paraboloid, the 4D convex hull is computed by incremental insertion along
+/// a space-filling curve, and the downward-facing facets are the Delaunay
+/// tetrahedra.
 ///
 /// Returns an (n, 4) array of vertex indices into the input array.
 #[pyfunction]
