@@ -4,14 +4,24 @@ build-backend = "maturin"
 
 [project]
 name = "shull"
+description = "Fast sweep-hull (S-hull) Delaunay triangulation in 2D and 3D, implemented in Rust"
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.8"
+dependencies = ["numpy"]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Topic :: Scientific/Engineering :: Mathematics",
 ]
 dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/schlegelp/shull"
 
 [tool.maturin]
 module-name = "shull._shull"
 features = ["pyo3/extension-module"]
+exclude = ["1602.04707v1.pdf", "ipyhull.py", "test.py", "winding_test.py"]
