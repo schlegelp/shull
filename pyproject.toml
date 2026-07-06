@@ -22,6 +22,10 @@ dynamic = ["version"]
 Repository = "https://github.com/schlegelp/shull"
 
 [tool.maturin]
+# Keeping the Python sources under python/ (rather than a top-level shull/
+# directory) prevents the source tree from shadowing the installed package
+# when running pytest from the repository root.
+python-source = "python"
 module-name = "shull._shull"
 features = ["pyo3/extension-module"]
 exclude = ["1602.04707v1.pdf", "ipyhull.py", "test.py", "winding_test.py"]
