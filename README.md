@@ -22,42 +22,13 @@ tests) fall back to Shewchuk's exact adaptive predicates (the
 valid even on adversarial inputs (cospherical grids, tight clusters far apart)
 where plain floating point corrupts the result.
 
-## TODOs
-- [x] implementation for the 2d case
-- [x] generalize from 2 to N dimensions: 3D Delaunay (tetrahedra) via 4D sweep-hull
-- [x] improve 2d performance: ~10X faster than scipy's Qhull-based Delaunay
-- [x] improve 3d performance: ~3–5.5X faster than scipy
-- [x] scipy-compatible API: `neighbors`, `convex_hull`, `vertex_neighbor_vertices`, `transform`, `find_simplex`, …
+## Install
 
-## Build
-1. `cd` into directory
-2. Activate virtual environment: `source .venv/bin/activate`
-3. Run `maturin develop` (use `maturin build --release` to build wheel)
+We provide prebuilt wheels for Linux, macOS, and Windows on PyPI:
 
-## Test / benchmark
+```bash
+pip install shull
 ```
-cargo test                      # Rust unit tests (incl. hull invariant checks)
-python -m pytest tests/        # property tests + comparison against scipy
-python bench.py                # benchmark against scipy.spatial.Delaunay
-```
-
-Benchmark on an Apple-silicon laptop (random uniform points, release build):
-
-**2D** (`Delaunay` vs `scipy.spatial.Delaunay`)
-
-| n | shull | scipy (Qhull) | speedup |
-|-----------|--------|--------|-------|
-| 10 000 | 0.002 s | 0.018 s | 9.8× |
-| 100 000 | 0.029 s | 0.30 s | 10.7× |
-| 1 000 000 | 0.46 s | 5.0 s | 10.9× |
-
-**3D** (`Delaunay3d` vs `scipy.spatial.Delaunay`)
-
-| n | shull | scipy (Qhull) | speedup |
-|-----------|--------|--------|-------|
-| 10 000 | 0.031 s | 0.098 s | 3.2× |
-| 100 000 | 0.32 s | 1.69 s | 5.3× |
-| 1 000 000 | 3.8 s | 20.8 s | 5.5× |
 
 ## Usage
 
@@ -136,3 +107,40 @@ Notes (both dimensions):
 - Points are triangulated after centering on their centroid (a ≤1-ulp
   perturbation of the coordinates), which makes the result robust to clouds
   positioned far from the origin.
+
+## TODOs
+- [x] implementation for the 2d case
+- [x] generalize from 2 to N dimensions: 3D Delaunay (tetrahedra) via 4D sweep-hull
+- [x] improve 2d performance: ~10X faster than scipy's Qhull-based Delaunay
+- [x] improve 3d performance: ~3–5.5X faster than scipy
+- [x] scipy-compatible API: `neighbors`, `convex_hull`, `vertex_neighbor_vertices`, `transform`, `find_simplex`, …
+
+## Build
+1. `cd` into directory
+2. Activate virtual environment: `source .venv/bin/activate`
+3. Run `maturin develop` (use `maturin build --release` to build wheel)
+
+## Test / benchmark
+```
+cargo test                      # Rust unit tests (incl. hull invariant checks)
+python -m pytest tests/        # property tests + comparison against scipy
+python bench.py                # benchmark against scipy.spatial.Delaunay
+```
+
+Benchmark on an Apple-silicon laptop (random uniform points, release build):
+
+**2D** (`Delaunay` vs `scipy.spatial.Delaunay`)
+
+| n | shull | scipy (Qhull) | speedup |
+|-----------|--------|--------|-------|
+| 10 000 | 0.002 s | 0.018 s | 9.8× |
+| 100 000 | 0.029 s | 0.30 s | 10.7× |
+| 1 000 000 | 0.46 s | 5.0 s | 10.9× |
+
+**3D** (`Delaunay3d` vs `scipy.spatial.Delaunay`)
+
+| n | shull | scipy (Qhull) | speedup |
+|-----------|--------|--------|-------|
+| 10 000 | 0.031 s | 0.098 s | 3.2× |
+| 100 000 | 0.32 s | 1.69 s | 5.3× |
+| 1 000 000 | 3.8 s | 20.8 s | 5.5× |
