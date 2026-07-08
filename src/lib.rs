@@ -12,8 +12,8 @@ pub use d4::delaunay4d;
 pub use error::DelaunayError;
 
 // int32 to match scipy.spatial.Delaunay's simplices/neighbors dtype. Called
-// inside `allow_threads` so the cast loop runs without the GIL; only the
-// zero-copy `into_pyarray` move of the result happens with the GIL held.
+// inside `detach` so the cast loop runs without the GIL; only the zero-copy
+// `into_pyarray` move of the result happens with the GIL held.
 fn to_i32_array<T: Copy + Into<i64>, const K: usize>(rows: Vec<[T; K]>) -> Array2<i32> {
     let mut out: Array2<i32> = Array2::zeros((rows.len(), K));
     for (i, row) in rows.iter().enumerate() {
@@ -26,14 +26,14 @@ fn to_i32_array<T: Copy + Into<i64>, const K: usize>(rows: Vec<[T; K]>) -> Array
 }
 
 type TriangulationArrays<'py> = (
-    &'py PyArray2<i32>,
-    &'py PyArray2<i32>,
-    &'py PyArray2<i32>,
+    Bound<'py, PyArray2<i32>>,
+    Bound<'py, PyArray2<i32>>,
+    Bound<'py, PyArray2<i32>>,
 );
 
 fn shull_2d_impl<'py, T: Copy + Into<f64> + numpy::Element + Send>(
     py: Python<'py>,
-    points: PyReadonlyArray2<T>,
+    points: PyReadonlyArray2<'py, T>,
 ) -> PyResult<TriangulationArrays<'py>> {
     let points = points.as_array();
     if points.ncols() != 2 {
@@ -44,7 +44,7 @@ fn shull_2d_impl<'py, T: Copy + Into<f64> + numpy::Element + Send>(
     // GIL is dropped.
     let points = points.to_owned();
     let (tris, nbrs, dups) = py
-        .allow_threads(move || {
+        .detach(move || {
             d2::delaunay2d(points.view())
                 .map(|(t, n, d)| (to_i32_array(t), to_i32_array(n), to_i32_array(d)))
         })
@@ -58,7 +58,7 @@ fn shull_2d_impl<'py, T: Copy + Into<f64> + numpy::Element + Send>(
 
 fn shull_3d_impl<'py, T: Copy + Into<f64> + numpy::Element + Send>(
     py: Python<'py>,
-    points: PyReadonlyArray2<T>,
+    points: PyReadonlyArray2<'py, T>,
 ) -> PyResult<TriangulationArrays<'py>> {
     let points = points.as_array();
     if points.ncols() != 3 {
@@ -67,7 +67,7 @@ fn shull_3d_impl<'py, T: Copy + Into<f64> + numpy::Element + Send>(
     // See shull_2d_impl for why the input is copied before releasing the GIL.
     let points = points.to_owned();
     let (tets, nbrs, dups) = py
-        .allow_threads(move || {
+        .detach(move || {
             d4::delaunay4d(points.view())
                 .map(|(t, n, d)| (to_i32_array(t), to_i32_array(n), to_i32_array(d)))
         })
@@ -93,7 +93,7 @@ fn shull_3d_impl<'py, T: Copy + Into<f64> + numpy::Element + Send>(
 #[pyfunction]
 pub fn calculate_shull_2d<'py>(
     py: Python<'py>,
-    points: PyReadonlyArray2<f64>,
+    points: PyReadonlyArray2<'py, f64>,
 ) -> PyResult<TriangulationArrays<'py>> {
     shull_2d_impl(py, points)
 }
@@ -103,7 +103,7 @@ pub fn calculate_shull_2d<'py>(
 #[pyfunction]
 pub fn calculate_shull_2d_f32<'py>(
     py: Python<'py>,
-    points: PyReadonlyArray2<f32>,
+    points: PyReadonlyArray2<'py, f32>,
 ) -> PyResult<TriangulationArrays<'py>> {
     shull_2d_impl(py, points)
 }
@@ -125,7 +125,7 @@ pub fn calculate_shull_2d_f32<'py>(
 #[pyfunction]
 pub fn calculate_shull_3d<'py>(
     py: Python<'py>,
-    points: PyReadonlyArray2<f64>,
+    points: PyReadonlyArray2<'py, f64>,
 ) -> PyResult<TriangulationArrays<'py>> {
     shull_3d_impl(py, points)
 }
@@ -136,7 +136,7 @@ pub fn calculate_shull_3d<'py>(
 #[pyfunction]
 pub fn calculate_shull_3d_f32<'py>(
     py: Python<'py>,
-    points: PyReadonlyArray2<f32>,
+    points: PyReadonlyArray2<'py, f32>,
 ) -> PyResult<TriangulationArrays<'py>> {
     shull_3d_impl(py, points)
 }
@@ -214,9 +214,9 @@ fn csr_adjacency(s: ArrayView2<i32>, n_points: usize) -> Result<(Vec<i32>, Vec<i
 #[pyfunction]
 pub fn vertex_neighbor_vertices<'py>(
     py: Python<'py>,
-    simplices: PyReadonlyArray2<i32>,
+    simplices: PyReadonlyArray2<'py, i32>,
     n_points: usize,
-) -> PyResult<(&'py PyArray1<i32>, &'py PyArray1<i32>)> {
+) -> PyResult<(Bound<'py, PyArray1<i32>>, Bound<'py, PyArray1<i32>>)> {
     if simplices.as_array().ncols() < 2 {
         return Err(PyValueError::new_err(
             "simplices must have at least 2 columns",
@@ -228,7 +228,7 @@ pub fn vertex_neighbor_vertices<'py>(
     // See shull_2d_impl for why the input is copied before releasing the GIL.
     let s = simplices.as_array().to_owned();
     let (indptr, indices) = py
-        .allow_threads(move || csr_adjacency(s.view(), n_points))
+        .detach(move || csr_adjacency(s.view(), n_points))
         .map_err(PyValueError::new_err)?;
     Ok((indptr.into_pyarray(py), indices.into_pyarray(py)))
 }
@@ -236,7 +236,7 @@ pub fn vertex_neighbor_vertices<'py>(
 /// A Python module implemented in Rust.
 #[pymodule]
 #[pyo3(name = "_shull")]
-fn shull(_py: Python, m: &PyModule) -> PyResult<()> {
+fn shull(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calculate_shull_2d, m)?)?;
     m.add_function(wrap_pyfunction!(calculate_shull_2d_f32, m)?)?;
     m.add_function(wrap_pyfunction!(calculate_shull_3d, m)?)?;

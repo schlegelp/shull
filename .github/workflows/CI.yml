@@ -2,7 +2,8 @@
 # adapted for this project:
 # - a test job (cargo test + pytest vs scipy) gates all builds
 # - targets trimmed to platforms numpy ships wheels for
-# - no free-threaded (3.14t) builds: pyo3 0.19 predates free-threading
+# - no free-threaded (3.14t) builds: the abi3 wheel doesn't cover t-builds,
+#   they'd need separate per-version wheels
 # - publishing uses PyPI trusted publishing (no long-lived API token);
 #   configure the repo as a trusted publisher on pypi.org for this to work
 name: CI

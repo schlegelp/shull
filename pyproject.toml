@@ -7,7 +7,7 @@ name = "shull"
 description = "Fast sweep-hull (S-hull) Delaunay triangulation in 2D and 3D, implemented in Rust"
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 dependencies = ["numpy"]
 classifiers = [
     "Programming Language :: Rust",

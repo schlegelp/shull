@@ -9,11 +9,11 @@ name = "shull"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-numpy = "0.19"
-ndarray = "0.15"
+numpy = "0.29"
+ndarray = "0.17"
 robust = "1"
 
 [dependencies.pyo3]
-version = "0.19.0"
-# "abi3-py38" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.8
-features = ["abi3-py38"]
+version = "0.29.0"
+# "abi3-py310" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.10
+features = ["abi3-py310"]
