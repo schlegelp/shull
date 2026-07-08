@@ -108,6 +108,35 @@ Notes (both dimensions):
   perturbation of the coordinates), which makes the result robust to clouds
   positioned far from the origin.
 
+## Use from Rust
+
+The crate is also usable as a plain Rust library: the Python bindings sit
+behind an off-by-default `python` cargo feature, so depending on `shull`
+pulls in only `ndarray` and `robust` — no pyo3, no Python at build time, no
+libpython in your binary.
+
+```toml
+[dependencies]
+shull = { git = "https://github.com/schlegelp/shull" }
+ndarray = "0.17"
+```
+
+```rust
+use ndarray::Array2;
+use shull::{delaunay2d, delaunay4d, csr_adjacency};
+
+let pts: Array2<f64> = /* (n, 2) array */;
+// triangles (ccw), neighbor triangle opposite each vertex (-1 on the hull),
+// and (dropped, kept) index pairs for exact duplicate points
+let (triangles, neighbors, duplicates) = delaunay2d(pts.view())?;
+// 3D points (n, 3) -> tetrahedra, same return layout:
+let (tetrahedra, neighbors, duplicates) = delaunay4d(pts3.view())?;
+```
+
+`csr_adjacency` builds the scipy-style `(indptr, indices)` vertex adjacency
+from a simplex array. Degenerate or oversized input is reported as a
+`DelaunayError` rather than a panic.
+
 ## TODOs
 - [x] implementation for the 2d case
 - [x] generalize from 2 to N dimensions: 3D Delaunay (tetrahedra) via 4D sweep-hull
