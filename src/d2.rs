@@ -156,7 +156,7 @@ impl Triangulator {
             let p1 = self.triangles[bl as usize];
 
             // (p0, pr, pl) is counterclockwise; the shared edge (pr, pl) is
-            // illegal iff p1 lies strictly inside its circumcircle.
+            // illegal if p1 lies strictly inside its circumcircle.
             let illegal = incircle(
                 coord(self.pts[p0 as usize]),
                 coord(self.pts[pr as usize]),

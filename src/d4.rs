@@ -124,16 +124,23 @@ fn det3(m: [[f64; 3]; 3]) -> f64 {
 }
 
 
+#[inline(always)]
 fn sub4(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]]
 }
 
+#[inline(always)]
 fn neg4(a: [f64; 4]) -> [f64; 4] {
     [-a[0], -a[1], -a[2], -a[3]]
 }
 
+/// Pairwise summation tree, not a left-to-right chain: the two independent
+/// halves let LLVM pack the multiplies into SIMD lanes, and a depth-2 tree
+/// has a smaller worst-case rounding error than the depth-3 chain, so every
+/// error bound calibrated against the chain remains valid.
+#[inline(always)]
 fn dot4(a: [f64; 4], b: [f64; 4]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+    (a[0] * b[0] + a[1] * b[1]) + (a[2] * b[2] + a[3] * b[3])
 }
 
 fn c3(pts: &[[f64; 4]], i: u32) -> Coord3D<f64> {
@@ -156,32 +163,57 @@ fn normal4(pts: &[[f64; 4]], v: &[u32; 4]) -> ([f64; 4], [f64; 4]) {
     // The four 3x3 minors share the six 2x2 subdeterminants of (w, x)
     // column pairs; expanding each minor along the `u` row reuses them, and
     // the absolute-value bounds reuse the same products.
-    let mut d2 = [[0.0f64; 4]; 4]; // d2[i][j] = w[i]*x[j] - w[j]*x[i]
-    let mut d2a = [[0.0f64; 4]; 4]; // |w[i]*x[j]| + |w[j]*x[i]|
-    for i in 0..3 {
-        for j in (i + 1)..4 {
-            let p = w[i] * x[j];
-            let q = w[j] * x[i];
-            d2[i][j] = p - q;
-            d2a[i][j] = p.abs() + q.abs();
-        }
+    //
+    // Laid out as dense straight-line code over [f64; 6] so LLVM can pack
+    // the isomorphic lanes into SIMD registers. Every output is term-for-term
+    // the same expression (same operands, same association) as the reference
+    // formulation d2[i][j] = w[i]*x[j] - w[j]*x[i], minor(i,j,k) =
+    // u[i]*d2[j][k] - u[j]*d2[i][k] + u[k]*d2[i][j], so results are
+    // bit-identical and the errb calibration is untouched.
+    const D01: usize = 0;
+    const D02: usize = 1;
+    const D03: usize = 2;
+    const D12: usize = 3;
+    const D13: usize = 4;
+    const D23: usize = 5;
+    let p = [
+        w[0] * x[1],
+        w[0] * x[2],
+        w[0] * x[3],
+        w[1] * x[2],
+        w[1] * x[3],
+        w[2] * x[3],
+    ];
+    let q = [
+        w[1] * x[0],
+        w[2] * x[0],
+        w[3] * x[0],
+        w[2] * x[1],
+        w[3] * x[1],
+        w[3] * x[2],
+    ];
+    let mut d2 = [0.0f64; 6]; // d2[ij] = w[i]*x[j] - w[j]*x[i]
+    let mut d2a = [0.0f64; 6]; // |w[i]*x[j]| + |w[j]*x[i]|
+    for k in 0..6 {
+        d2[k] = p[k] - q[k];
+        d2a[k] = p[k].abs() + q[k].abs();
     }
-    let minor = |i: usize, j: usize, k: usize| {
-        (
-            u[i] * d2[j][k] - u[j] * d2[i][k] + u[k] * d2[i][j],
-            u[i].abs() * d2a[j][k] + u[j].abs() * d2a[i][k] + u[k].abs() * d2a[i][j],
-        )
-    };
+    let ua = [u[0].abs(), u[1].abs(), u[2].abs(), u[3].abs()];
 
-    let (m0, a0) = minor(1, 2, 3);
-    let (m1, a1) = minor(0, 2, 3);
-    let (m2, a2) = minor(0, 1, 3);
-    let (m3, a3) = minor(0, 1, 2);
+    let m0 = u[1] * d2[D23] - u[2] * d2[D13] + u[3] * d2[D12];
+    let m1 = u[0] * d2[D23] - u[2] * d2[D03] + u[3] * d2[D02];
+    let m2 = u[0] * d2[D13] - u[1] * d2[D03] + u[3] * d2[D01];
+    let m3 = u[0] * d2[D12] - u[1] * d2[D02] + u[2] * d2[D01];
+    let a0 = ua[1] * d2a[D23] + ua[2] * d2a[D13] + ua[3] * d2a[D12];
+    let a1 = ua[0] * d2a[D23] + ua[2] * d2a[D03] + ua[3] * d2a[D02];
+    let a2 = ua[0] * d2a[D13] + ua[1] * d2a[D03] + ua[3] * d2a[D01];
+    let a3 = ua[0] * d2a[D12] + ua[1] * d2a[D02] + ua[2] * d2a[D01];
     ([m0, -m1, m2, -m3], [a0, a1, a2, a3])
 }
 
 /// Signed visibility of point `p` against facet `t`
 /// (positive = `p` is on the outward side of the facet's hyperplane).
+#[inline(always)]
 fn facet_dist(pts: &[[f64; 4]], t: &Tet, p: u32) -> f64 {
     let d = sub4(pts[p as usize], pts[t.v[0] as usize]);
     dot4(d, t.norm)
@@ -700,8 +732,8 @@ fn check_hull(hull: &[Tet], flags: &[u8]) -> Result<(), DelaunayError> {
 /// The lower-hull test and the orientation are decided with the exact
 /// `orient3d` predicate: the canonical normal's w component is
 /// -det[v1-v0; v2-v0; v3-v0] (3D rows), so the stored normal points downward
-/// iff (flip XOR the 3D orientation is negative)... concretely: keep the
-/// facet iff `flip ? o < 0 : o > 0` where o = det[v1-v0; v2-v0; v3-v0],
+/// if (flip XOR the 3D orientation is negative)... concretely: keep the
+/// facet if `flip ? o < 0 : o > 0` where o = det[v1-v0; v2-v0; v3-v0],
 /// and o == 0 (a vertical facet, i.e. a zero-volume sliver) is dropped.
 fn compact_output(
     pts: &[[f64; 4]],
@@ -1187,6 +1219,161 @@ mod tests {
         let t64 = delaunay4d(arr64.view()).unwrap();
         assert!(!t32.0.is_empty());
         assert_eq!(t32, t64);
+    }
+
+    /// The forward error bound must make the float fast path sign-exact:
+    /// whenever `|facet_dist| > errb`, the exact predicate must agree and be
+    /// nonzero. Point families stress different regimes; the grid and
+    /// jittered-sphere families are required to actually hit the
+    /// `|d| <= errb` band so the test cannot pass vacuously.
+    #[test]
+    fn float_sign_matches_exact_within_bound() {
+        let mut state = 0xD1B54A32D192ED03u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+
+        let uniform = pseudo_random_points(300, 42);
+        let mut grid = Vec::new();
+        for x in 0..7 {
+            for y in 0..7 {
+                for z in 0..7 {
+                    grid.push([x as f64, y as f64, z as f64]);
+                }
+            }
+        }
+        // Points on the unit sphere, jittered by a few ulps: every 5-tuple is
+        // nearly cospherical, so the lifted determinants are tiny.
+        let sphere: Vec<[f64; 3]> = (0..300)
+            .map(|_| {
+                let u = 2.0 * next() - 1.0;
+                let phi = std::f64::consts::TAU * next();
+                let r = (1.0 - u * u).sqrt();
+                [r * phi.cos(), r * phi.sin(), u]
+                    .map(|c| c * (1.0 + (next() - 0.5) * 4.0 * f64::EPSILON))
+            })
+            .collect();
+        let clusters: Vec<[f64; 3]> = (0..400)
+            .map(|i| {
+                let off = if i < 200 { 0.0 } else { 1000.0 };
+                [next() * 1e-6 + off, next() * 1e-6 + off, next() * 1e-6 + off]
+            })
+            .collect();
+        let scale = |pts: &[[f64; 3]], s: f64| -> Vec<[f64; 3]> {
+            pts.iter().map(|p| p.map(|c| c * s)).collect()
+        };
+
+        let families: Vec<(&str, Vec<[f64; 3]>, bool)> = vec![
+            ("uniform", uniform.clone(), false),
+            ("grid", grid, true),
+            ("sphere", sphere, true),
+            ("clusters", clusters, false),
+            ("huge", scale(&uniform, 1e30), false),
+            ("tiny", scale(&uniform, 1e-30), false),
+        ];
+
+        let mut rng = 0x243F6A8885A308D3u64;
+        let mut pick = move |n: u32| -> u32 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng >> 33) as u32 % n
+        };
+
+        for (name, points, must_hit_band) in families {
+            let (pts, _) = lift_and_sort(to_array(&points).view());
+            let mut mabs2 = [0.0f64; 4];
+            for p in &pts {
+                for k in 0..4 {
+                    mabs2[k] = mabs2[k].max(2.0 * p[k].abs());
+                }
+            }
+            let n = pts.len() as u32;
+            let (mut band, mut checked) = (0usize, 0usize);
+            for _ in 0..10_000 {
+                let mut idx = [0u32; 5];
+                for s in 0..5 {
+                    loop {
+                        let c = pick(n);
+                        if !idx[..s].contains(&c) {
+                            idx[s] = c;
+                            break;
+                        }
+                    }
+                }
+                let v = [idx[0], idx[1], idx[2], idx[3]];
+                let q = idx[4];
+                let (canon, nabs) = normal4(&pts, &v);
+                let errb = ERRB_COEFF * dot4(mabs2, nabs);
+                let t = Tet { v, n: [NONE; 4], norm: canon, errb };
+                let d = facet_dist(&pts, &t, q);
+                if d.abs() > errb {
+                    let s = exact_dist_sign(&pts, &t, false, q);
+                    assert!(
+                        s != 0.0 && (d > 0.0) == (s > 0.0),
+                        "family {}: float {} (errb {}) disagrees with exact {}",
+                        name,
+                        d,
+                        errb,
+                        s
+                    );
+                    checked += 1;
+                } else {
+                    band += 1;
+                }
+            }
+            assert!(checked > 0, "family {}: no tuples cleared the bound", name);
+            if must_hit_band {
+                assert!(band > 0, "family {}: |d| <= errb band never hit", name);
+            }
+        }
+    }
+
+    /// The triangulation is fully determined by exact-sign decisions: above
+    /// the error bound the float sign equals the exact sign, inside it the
+    /// exact predicate decides. The output is therefore invariant even under
+    /// floating-point reassociation of the guarded fast paths, and these
+    /// checksums (captured before the SIMD-friendly kernel rewrites) must
+    /// never change -- a difference means an error-bound violation, not a
+    /// benign perturbation.
+    #[test]
+    fn output_checksum_is_stable() {
+        fn eat(h: &mut u64, v: u64) {
+            *h ^= v;
+            *h = h.wrapping_mul(0x100000001b3);
+        }
+        for (n, seed, expect) in [
+            (500usize, 3u64, 0x584e_9e86_da40_c668u64),
+            (10_000, 1, 0x0077_1aeb_a894_d84fu64),
+            (100_000, 2, 0x33ce_bf74_2d7c_cb70u64),
+        ] {
+            // The larger cases take minutes without optimization; CI covers
+            // them via `cargo test --release`.
+            if cfg!(debug_assertions) && n > 500 {
+                continue;
+            }
+            let points = pseudo_random_points(n, seed);
+            let (tets, nbrs) = delaunay4d(to_array(&points).view()).unwrap();
+            let mut h = 0xcbf29ce484222325u64;
+            for tet in &tets {
+                for &v in tet {
+                    eat(&mut h, v as u64);
+                }
+            }
+            for nb in &nbrs {
+                for &v in nb {
+                    eat(&mut h, v as u32 as u64);
+                }
+            }
+            assert_eq!(
+                h, expect,
+                "output checksum changed for n={} seed={}",
+                n, seed
+            );
+        }
     }
 
     #[test]

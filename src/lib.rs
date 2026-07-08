@@ -125,7 +125,7 @@ pub fn calculate_shull_3d_f32<'py>(
 
 /// Build the vertex-adjacency CSR arrays from an (n, k) simplex array.
 ///
-/// Two vertices are adjacent iff they share a simplex. Returns
+/// Two vertices are adjacent if they share a simplex. Returns
 /// `(indptr, indices)` (both int32) where the neighbors of vertex v are
 /// `indices[indptr[v]..indptr[v + 1]]`, sorted ascending — the same layout
 /// as scipy's `vertex_neighbor_vertices`. Vertices in `0..n_points` not
