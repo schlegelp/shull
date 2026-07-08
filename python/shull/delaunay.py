@@ -42,7 +42,8 @@ class Delaunay:
       `indices[indptr[k]:indptr[k+1]]` (sorted ascending).
     - `coplanar`: (ncoplanar, 3) int32 rows of [point index, index of a
       simplex containing the nearest included point, index of the nearest
-      included point]. Here these are exactly the dropped duplicate points.
+      included point]. Here these are exactly the dropped duplicate points;
+      the included point is the duplicate's first occurrence.
     - `transform`: (nsimplex, ndim+1, ndim) float64 barycentric transforms;
       `transform[i, :ndim, :]` is the inverse of T and `transform[i, ndim, :]`
       is the vector r such that ``c = transform[i, :ndim, :] @ (x - r)``
@@ -62,8 +63,10 @@ class Delaunay:
       coordinates widen to float64 exactly internally, so the result is
       identical to passing `points.astype(np.float64)`. Any other dtype is
       converted to float64.
-    - Exact duplicate points are dropped (one representative is kept);
-      dropped points are reported in `coplanar`.
+    - Exact duplicate points are dropped, keeping the first occurrence as
+      representative (scipy also drops duplicates, but which copy Qhull
+      keeps is arbitrary); dropped points are reported in `coplanar`, from
+      a mapping the triangulation records as it dedups.
     - Degenerate input (too few distinct points, all points collinear in
       2D, all points coplanar/cospherical in 3D) raises ValueError — a
       full-dimensional triangulation does not exist in those cases.
@@ -94,7 +97,7 @@ class Delaunay:
             self.points = points.astype(np.float64, copy=False)
             calculate = (_shull.calculate_shull_2d if points.shape[1] == 2
                          else _shull.calculate_shull_3d)
-        self.simplices, self.neighbors = calculate(self.points)
+        self.simplices, self.neighbors, self._coplanar_pairs = calculate(self.points)
         if points.shape[1] == 2:
             self.triangles = self.simplices
 
@@ -139,24 +142,15 @@ class Delaunay:
 
     @functools.cached_property
     def coplanar(self):
-        used = np.zeros(self.npoints, dtype=bool)
-        used[self.simplices] = True
-        dropped = np.nonzero(~used)[0]
-        if dropped.size == 0:
+        # The (dropped, kept) pairs are recorded by the Rust core while it
+        # dedups during its mandatory sort, so no reconstruction is needed.
+        pairs = self._coplanar_pairs
+        if pairs.shape[0] == 0:
             return np.empty((0, 3), dtype=np.int32)
-        # Every dropped point is an exact duplicate of a kept one: group by
-        # coordinates and map each dropped point to the kept member of its
-        # group.
-        _, group = np.unique(self.points, axis=0, return_inverse=True)
-        group = group.reshape(-1)
-        kept = np.nonzero(used)[0]
-        rep_of_group = np.empty(group.max() + 1, dtype=np.int64)
-        rep_of_group[group[kept]] = kept
-        reps = rep_of_group[group[dropped]]
-        out = np.empty((dropped.size, 3), dtype=np.int32)
-        out[:, 0] = dropped
-        out[:, 1] = self.vertex_to_simplex[reps]
-        out[:, 2] = reps
+        out = np.empty((pairs.shape[0], 3), dtype=np.int32)
+        out[:, 0] = pairs[:, 0]
+        out[:, 1] = self.vertex_to_simplex[pairs[:, 1]]
+        out[:, 2] = pairs[:, 1]
         return out
 
     @functools.cached_property

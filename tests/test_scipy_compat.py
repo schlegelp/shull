@@ -168,8 +168,13 @@ def test_coplanar(ndim):
     assert cop.shape == (10, 3) and cop.dtype == np.int32
     for dropped, simplex, rep in cop:
         np.testing.assert_array_equal(dup[dropped], dup[rep])
-        assert dropped != rep
         assert rep in np.asarray(d.simplices)[simplex]
+        # The first occurrence is kept as the representative (like Qhull).
+        assert rep == dropped - 100
+    # The dropped points are exactly the ones absent from the simplices.
+    used = np.zeros(d.npoints, dtype=bool)
+    used[d.simplices] = True
+    np.testing.assert_array_equal(np.nonzero(~used)[0], np.sort(cop[:, 0]))
     # Without duplicates: empty, like scipy for points in general position.
     assert shull.Delaunay(pts).coplanar.shape == (0, 3)
 

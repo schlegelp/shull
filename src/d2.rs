@@ -207,11 +207,13 @@ impl Triangulator {
 /// Returns counterclockwise triangles as indices into the caller's point
 /// array, plus the triangle adjacency: `neighbors[t][j]` is the triangle
 /// across the edge opposite vertex j of triangle t (scipy's convention),
-/// -1 on the hull. Exact duplicate points are dropped (one representative
-/// is kept).
+/// -1 on the hull. Exact duplicate points are dropped and reported in the
+/// third element as `[dropped index, kept index]` rows; the kept index is
+/// always the first occurrence (scipy's Qhull also drops duplicates but
+/// keeps an arbitrary occurrence).
 pub fn delaunay2d<T: Copy + Into<f64>>(
     points: ArrayView2<T>,
-) -> Result<(Vec<[u32; 3]>, Vec<[i32; 3]>), DelaunayError> {
+) -> Result<(Vec<[u32; 3]>, Vec<[i32; 3]>, Vec<[u32; 2]>), DelaunayError> {
     assert_eq!(points.ncols(), 2, "input points must be 2D");
     let n = points.nrows();
     if n >= EMPTY as usize {
@@ -335,15 +337,29 @@ pub fn delaunay2d<T: Copy + Into<f64>>(
     tr.hull_hash[key] = i2;
     tr.add_triangle(i0, i1, i2, EMPTY, EMPTY, EMPTY);
 
+    let mut dropped: Vec<[u32; 2]> = Vec::new();
     let mut prev: Option<[f64; 2]> = None;
+    // Representative (kept) index of the current run of coordinate-equal
+    // points; duplicates in the run map to it.
+    let mut last_kept = EMPTY;
     for &(_, i) in &ids {
         let p = tr.pts[i as usize];
 
-        // Exact duplicates are adjacent in the sorted order: skip them.
+        // Exact duplicates are adjacent in the sorted order: skip them,
+        // recording who they duplicate. The guards are defensive only: a
+        // seed always leads its duplicate run (`min_by` and the strict `<`
+        // in the i2 scan pick the first minimum on bit-identical ties, so
+        // each seed is the lowest index of its coordinate class), and
+        // `last_kept` is EMPTY only if the run leader vanished via the
+        // e == EMPTY path below without matching a seed.
         if prev == Some(p) {
+            if last_kept != EMPTY && i != i0 && i != i1 && i != i2 {
+                dropped.push([i, last_kept]);
+            }
             continue;
         }
         prev = Some(p);
+        last_kept = i;
         if i == i0 || i == i1 || i == i2 {
             continue;
         }
@@ -372,7 +388,26 @@ pub fn delaunay2d<T: Copy + Into<f64>>(
             }
         }
         if e == EMPTY {
-            continue; // point coincides with a hull vertex
+            // No visible hull edge: p coincides with a hull vertex. Points
+            // are inserted by increasing distance from the sort center and
+            // dist² is strictly convex, so a distinct point processed at or
+            // after the seeds' distance is strictly outside the hull — this
+            // is unreachable in practice. Defensively map an exact seed
+            // match; otherwise leave the point unrecorded (better than
+            // misattributing later coordinate-equal points).
+            last_kept = if p == tr.pts[i0 as usize] {
+                i0
+            } else if p == tr.pts[i1 as usize] {
+                i1
+            } else if p == tr.pts[i2 as usize] {
+                i2
+            } else {
+                EMPTY
+            };
+            if last_kept != EMPTY {
+                dropped.push([i, last_kept]);
+            }
+            continue;
         }
 
         // First triangle from the new point.
@@ -439,7 +474,7 @@ pub fn delaunay2d<T: Copy + Into<f64>>(
         .chunks_exact(3)
         .map(|t| [t[0], t[1], t[2]])
         .collect();
-    Ok((triangles, neighbors))
+    Ok((triangles, neighbors, dropped))
 }
 
 #[cfg(test)]
@@ -523,7 +558,7 @@ mod tests {
     fn random_points_are_delaunay() {
         for seed in [1, 2, 3] {
             let points = pseudo_random_points(120, seed);
-            let (tris, _) = delaunay2d(to_array(&points).view()).unwrap();
+            let (tris, _, _) = delaunay2d(to_array(&points).view()).unwrap();
             assert!(!tris.is_empty());
             assert_delaunay(&points, &tris);
             // Every point must appear (no drops on distinct inputs).
@@ -541,7 +576,7 @@ mod tests {
     fn triangle_count_matches_euler() {
         // For n points with h on the hull: triangles = 2n - h - 2.
         let points = pseudo_random_points(500, 4);
-        let (tris, _) = delaunay2d(to_array(&points).view()).unwrap();
+        let (tris, _, _) = delaunay2d(to_array(&points).view()).unwrap();
         // Count hull edges: edges that appear in only one triangle.
         let mut edge_count = std::collections::HashMap::new();
         for t in &tris {
@@ -557,7 +592,7 @@ mod tests {
     #[test]
     fn neighbors_are_mutual_and_share_edges() {
         let points = pseudo_random_points(200, 11);
-        let (tris, nbrs) = delaunay2d(to_array(&points).view()).unwrap();
+        let (tris, nbrs, _) = delaunay2d(to_array(&points).view()).unwrap();
         assert_eq!(tris.len(), nbrs.len());
         let mut boundary = 0;
         for (t, nb) in nbrs.iter().enumerate() {
@@ -595,7 +630,7 @@ mod tests {
                 points.push([x as f64, y as f64]);
             }
         }
-        let (tris, _) = delaunay2d(to_array(&points).view()).unwrap();
+        let (tris, _, _) = delaunay2d(to_array(&points).view()).unwrap();
         assert_eq!(tris.len(), 2 * 29 * 29); // grid area tiled by half-squares
         let total: f64 = tris
             .iter()
@@ -615,13 +650,70 @@ mod tests {
         let mut points = pseudo_random_points(50, 7);
         points.push(points[3]);
         points.push(points[20]);
-        let (tris, _) = delaunay2d(to_array(&points).view()).unwrap();
+        let (tris, _, dropped) = delaunay2d(to_array(&points).view()).unwrap();
         assert_delaunay(&points[..50], &tris);
         let used: std::collections::HashSet<u32> =
             tris.iter().flatten().copied().collect();
-        // One representative of each duplicate pair.
-        assert!(used.contains(&3) ^ used.contains(&50));
-        assert!(used.contains(&20) ^ used.contains(&51));
+        // The first occurrence is kept, the duplicate maps to it.
+        let pairs: std::collections::HashSet<[u32; 2]> = dropped.iter().copied().collect();
+        assert_eq!(pairs, [[50, 3], [51, 20]].into_iter().collect());
+        for &[d, r] in &dropped {
+            assert_eq!(points[d as usize], points[r as usize]);
+        }
+        // Dropped indices are exactly the ones absent from the output.
+        for v in 0..points.len() as u32 {
+            assert_eq!(used.contains(&v), !dropped.iter().any(|&[d, _]| d == v));
+        }
+    }
+
+    #[test]
+    fn seed_duplicate_maps_to_seed() {
+        // 5x5 grid centered on the origin: the centroid is (0, 0), so the
+        // center point becomes seed i0. Its duplicate must map to it even
+        // though seeds are inserted out of radial order.
+        let mut points = Vec::new();
+        for x in -2..=2 {
+            for y in -2..=2 {
+                points.push([x as f64, y as f64]);
+            }
+        }
+        let center = points.iter().position(|&p| p == [0.0, 0.0]).unwrap() as u32;
+        points.push([0.0, 0.0]);
+        let dup = (points.len() - 1) as u32;
+        let (tris, _, dropped) = delaunay2d(to_array(&points).view()).unwrap();
+        assert_eq!(dropped, vec![[dup, center]]);
+        let used: std::collections::HashSet<u32> =
+            tris.iter().flatten().copied().collect();
+        assert!(used.contains(&center) && !used.contains(&dup));
+
+        // Same, with the seed's coordinate class starting at index 0.
+        let mut points = vec![[0.0, 0.0]];
+        for x in -2..=2 {
+            for y in -2..=2 {
+                if (x, y) != (0, 0) {
+                    points.push([x as f64, y as f64]);
+                }
+            }
+        }
+        points.push([0.0, 0.0]);
+        let dup = (points.len() - 1) as u32;
+        let (_, _, dropped) = delaunay2d(to_array(&points).view()).unwrap();
+        assert_eq!(dropped, vec![[dup, 0]]);
+    }
+
+    #[test]
+    fn triple_duplicates_map_to_single_rep() {
+        let mut points = pseudo_random_points(30, 5);
+        points.push(points[7]);
+        points.push(points[7]);
+        points.push(points[7]);
+        let (tris, _, dropped) = delaunay2d(to_array(&points).view()).unwrap();
+        let pairs: std::collections::HashSet<[u32; 2]> = dropped.iter().copied().collect();
+        assert_eq!(pairs, [[30, 7], [31, 7], [32, 7]].into_iter().collect());
+        let used: std::collections::HashSet<u32> =
+            tris.iter().flatten().copied().collect();
+        assert!(used.contains(&7));
+        assert!(!used.contains(&30) && !used.contains(&31) && !used.contains(&32));
     }
 
     #[test]
@@ -670,7 +762,7 @@ mod tests {
                 [next() * 1e-6 + off, next() * 1e-6 + off]
             })
             .collect();
-        let (tris, _) = delaunay2d(to_array(&points).view()).unwrap();
+        let (tris, _, _) = delaunay2d(to_array(&points).view()).unwrap();
         let mut seen = vec![false; 400];
         for t in &tris {
             for &v in t {

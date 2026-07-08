@@ -12,6 +12,6 @@ fn main() {
     let data: Vec<f64> = (0..n * 3).map(|_| next()).collect();
     let pts = Array2::from_shape_vec((n, 3), data).unwrap();
     let t0 = std::time::Instant::now();
-    let (tets, _) = shull::delaunay4d(pts.view()).unwrap();
+    let (tets, _, _) = shull::delaunay4d(pts.view()).unwrap();
     println!("{} tets in {:?}", tets.len(), t0.elapsed());
 }

@@ -254,7 +254,9 @@ fn visible_weak(pts: &[[f64; 4]], t: &Tet, flip: bool, p: u32) -> bool {
 
 /// Center the points on their centroid, lift onto the paraboloid, drop exact
 /// duplicates and order the survivors for insertion. Returns the lifted
-/// points and, for each, the index into the caller's original array.
+/// points, for each the index into the caller's original array, and one
+/// `[dropped index, kept index]` row per removed duplicate (original
+/// indices; the kept index is the first occurrence).
 ///
 /// Two-stage sort: first by (w, x, y, z), which makes exact duplicates
 /// adjacent (dedup, lowest original index survives); then by the Morton code
@@ -263,7 +265,9 @@ fn visible_weak(pts: &[[f64; 4]], t: &Tet, flip: bool, p: u32) -> bool {
 /// Generic over the input element type: f32 coordinates convert to f64
 /// exactly, so all downstream arithmetic (and its guarantees) is unchanged
 /// and the result is identical to converting the input up front.
-fn lift_and_sort<T: Copy + Into<f64>>(points: ArrayView2<T>) -> (Vec<[f64; 4]>, Vec<u32>) {
+fn lift_and_sort<T: Copy + Into<f64>>(
+    points: ArrayView2<T>,
+) -> (Vec<[f64; 4]>, Vec<u32>, Vec<[u32; 2]>) {
     let n = points.nrows();
     let mut cx = 0.0;
     let mut cy = 0.0;
@@ -323,7 +327,18 @@ fn lift_and_sort<T: Copy + Into<f64>>(points: ArrayView2<T>) -> (Vec<[f64; 4]>, 
         }
         s = e;
     }
-    lifted.dedup_by(|a, b| a.0 == b.0);
+    // `dedup_by` passes (a = removal candidate, b = retained run leader), so
+    // b stays the first — lowest-index — element of its run and every extra
+    // copy maps to that single representative.
+    let mut dropped: Vec<[u32; 2]> = Vec::new();
+    lifted.dedup_by(|a, b| {
+        if a.0 == b.0 {
+            dropped.push([a.1, b.1]);
+            true
+        } else {
+            false
+        }
+    });
 
     // Insertion order: Morton code of (x, y, z), quantized to 10 bits per
     // axis. A degenerate axis (zero extent) keeps scale 0 and contributes
@@ -346,7 +361,7 @@ fn lift_and_sort<T: Copy + Into<f64>>(points: ArrayView2<T>) -> (Vec<[f64; 4]>, 
 
     let orig = lifted.iter().map(|&(_, i)| i).collect();
     let pts = lifted.into_iter().map(|(p, _)| p).collect();
-    (pts, orig)
+    (pts, orig, dropped)
 }
 
 /// Find the first 5 points whose lifted images are affinely independent and
@@ -804,11 +819,13 @@ fn compact_output(
 /// Returns tetrahedra as indices into the caller's point array, positively
 /// oriented, plus their adjacency: `neighbors[t][j]` is the tetrahedron
 /// across the ridge opposite vertex j of tetrahedron t (scipy's convention),
-/// -1 on the hull boundary. Exact duplicate points are dropped (their
-/// indices never appear in the output).
+/// -1 on the hull boundary. Exact duplicate points are dropped and reported
+/// in the third element as `[dropped index, kept index]` rows; the kept
+/// index is always the first occurrence (scipy's Qhull also drops
+/// duplicates but keeps an arbitrary occurrence).
 pub fn delaunay4d<T: Copy + Into<f64>>(
     points: ArrayView2<T>,
-) -> Result<(Vec<[u32; 4]>, Vec<[i32; 4]>), DelaunayError> {
+) -> Result<(Vec<[u32; 4]>, Vec<[i32; 4]>, Vec<[u32; 2]>), DelaunayError> {
     assert_eq!(points.ncols(), 3, "input points must be 3D");
     if points.nrows() >= NONE as usize {
         return Err(DelaunayError::Degenerate(format!(
@@ -818,7 +835,7 @@ pub fn delaunay4d<T: Copy + Into<f64>>(
         )));
     }
 
-    let (mut pts, mut orig) = lift_and_sort(points);
+    let (mut pts, mut orig, dropped) = lift_and_sort(points);
     if pts.len() < 5 {
         return Err(DelaunayError::TooFewPoints(pts.len()));
     }
@@ -851,14 +868,19 @@ pub fn delaunay4d<T: Copy + Into<f64>>(
         }
         match find_visible(&pts, &hull, &flags, &ws, p) {
             Some(h) => insert_point(&pts, mabs2, &mut hull, &mut flags, &mut ws, p, h)?,
-            None => continue, // residual duplicate; skip
+            // Unreachable after exact dedup (distinct points are strictly
+            // extreme on the paraboloid under the exact lift); kept as a
+            // safety net — such a point would be absent from the output and
+            // from the duplicate mapping.
+            None => continue,
         }
 
         #[cfg(debug_assertions)]
         check_hull(&hull, &flags)?;
     }
 
-    Ok(compact_output(&pts, &hull, &flags, &orig))
+    let (tets, neighbors) = compact_output(&pts, &hull, &flags, &orig);
+    Ok((tets, neighbors, dropped))
 }
 
 #[cfg(test)]
@@ -1092,7 +1114,7 @@ mod tests {
             [0.0, 0.0, 1.0],
             [0.2, 0.2, 0.2],
         ];
-        let (tets, _) = delaunay4d(to_array(&points).view()).unwrap();
+        let (tets, _, _) = delaunay4d(to_array(&points).view()).unwrap();
         assert_eq!(tets.len(), 4);
         assert_delaunay(&points, &tets);
         // Every tet must contain the interior point (index 4).
@@ -1105,7 +1127,7 @@ mod tests {
     fn random_points_are_delaunay() {
         for seed in [1, 2, 3] {
             let points = pseudo_random_points(80, seed);
-            let (tets, _) = delaunay4d(to_array(&points).view()).unwrap();
+            let (tets, _, _) = delaunay4d(to_array(&points).view()).unwrap();
             assert!(!tets.is_empty());
             assert_delaunay(&points, &tets);
             for tet in &tets {
@@ -1123,17 +1145,41 @@ mod tests {
         let mut points = pseudo_random_points(40, 7);
         points.push(points[0]);
         points.push(points[10]);
-        let (tets, _) = delaunay4d(to_array(&points).view()).unwrap();
+        let (tets, _, dropped) = delaunay4d(to_array(&points).view()).unwrap();
         assert_delaunay(&points[..40], &tets);
         for tet in &tets {
             assert!(!tet.contains(&40) && !tet.contains(&41));
         }
+        // The first occurrence is kept, the duplicate maps to it.
+        let pairs: std::collections::HashSet<[u32; 2]> = dropped.iter().copied().collect();
+        assert_eq!(pairs, [[40, 0], [41, 10]].into_iter().collect());
+        for &[d, r] in &dropped {
+            assert_eq!(points[d as usize], points[r as usize]);
+        }
+        let used: std::collections::HashSet<u32> =
+            tets.iter().flatten().copied().collect();
+        assert!(used.contains(&0) && used.contains(&10));
+    }
+
+    #[test]
+    fn triple_duplicates_map_to_single_rep() {
+        let mut points = pseudo_random_points(30, 5);
+        points.push(points[7]);
+        points.push(points[7]);
+        points.push(points[7]);
+        let (tets, _, dropped) = delaunay4d(to_array(&points).view()).unwrap();
+        let pairs: std::collections::HashSet<[u32; 2]> = dropped.iter().copied().collect();
+        assert_eq!(pairs, [[30, 7], [31, 7], [32, 7]].into_iter().collect());
+        let used: std::collections::HashSet<u32> =
+            tets.iter().flatten().copied().collect();
+        assert!(used.contains(&7));
+        assert!(!used.contains(&30) && !used.contains(&31) && !used.contains(&32));
     }
 
     #[test]
     fn neighbors_are_mutual_and_share_ridges() {
         let points = pseudo_random_points(150, 21);
-        let (tets, nbrs) = delaunay4d(to_array(&points).view()).unwrap();
+        let (tets, nbrs, _) = delaunay4d(to_array(&points).view()).unwrap();
         assert_eq!(tets.len(), nbrs.len());
         let mut boundary = 0;
         for (t, nb) in nbrs.iter().enumerate() {
@@ -1195,7 +1241,7 @@ mod tests {
                 }
             }
         }
-        let (tets, _) = delaunay4d(to_array(&points).view()).unwrap();
+        let (tets, _, _) = delaunay4d(to_array(&points).view()).unwrap();
         // The union of tets must tile the cube: total volume = 27; and no
         // inverted or degenerate tets.
         let mut total = 0.0;
@@ -1284,7 +1330,7 @@ mod tests {
         };
 
         for (name, points, must_hit_band) in families {
-            let (pts, _) = lift_and_sort(to_array(&points).view());
+            let (pts, _, _) = lift_and_sort(to_array(&points).view());
             let mut mabs2 = [0.0f64; 4];
             for p in &pts {
                 for k in 0..4 {
@@ -1356,7 +1402,7 @@ mod tests {
                 continue;
             }
             let points = pseudo_random_points(n, seed);
-            let (tets, nbrs) = delaunay4d(to_array(&points).view()).unwrap();
+            let (tets, nbrs, _) = delaunay4d(to_array(&points).view()).unwrap();
             let mut h = 0xcbf29ce484222325u64;
             for tet in &tets {
                 for &v in tet {
@@ -1396,7 +1442,7 @@ mod tests {
                 next() * 1e-6 + off,
             ]);
         }
-        let (tets, _) = delaunay4d(to_array(&points).view()).unwrap();
+        let (tets, _, _) = delaunay4d(to_array(&points).view()).unwrap();
         assert!(!tets.is_empty());
         // All 400 points must appear as vertices.
         let mut seen = vec![false; 400];

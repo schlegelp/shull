@@ -25,12 +25,16 @@ fn to_i32_array<T: Copy + Into<i64>, const K: usize>(rows: Vec<[T; K]>) -> Array
     out
 }
 
-type SimplicesAndNeighbors<'py> = (&'py PyArray2<i32>, &'py PyArray2<i32>);
+type TriangulationArrays<'py> = (
+    &'py PyArray2<i32>,
+    &'py PyArray2<i32>,
+    &'py PyArray2<i32>,
+);
 
 fn shull_2d_impl<'py, T: Copy + Into<f64> + numpy::Element + Send>(
     py: Python<'py>,
     points: PyReadonlyArray2<T>,
-) -> PyResult<SimplicesAndNeighbors<'py>> {
+) -> PyResult<TriangulationArrays<'py>> {
     let points = points.as_array();
     if points.ncols() != 2 {
         return Err(PyValueError::new_err("input points must have shape (n, 2)"));
@@ -39,30 +43,40 @@ fn shull_2d_impl<'py, T: Copy + Into<f64> + numpy::Element + Send>(
     // released: other Python threads may mutate the input buffer once the
     // GIL is dropped.
     let points = points.to_owned();
-    let (tris, nbrs) = py
+    let (tris, nbrs, dups) = py
         .allow_threads(move || {
-            d2::delaunay2d(points.view()).map(|(t, n)| (to_i32_array(t), to_i32_array(n)))
+            d2::delaunay2d(points.view())
+                .map(|(t, n, d)| (to_i32_array(t), to_i32_array(n), to_i32_array(d)))
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok((tris.into_pyarray(py), nbrs.into_pyarray(py)))
+    Ok((
+        tris.into_pyarray(py),
+        nbrs.into_pyarray(py),
+        dups.into_pyarray(py),
+    ))
 }
 
 fn shull_3d_impl<'py, T: Copy + Into<f64> + numpy::Element + Send>(
     py: Python<'py>,
     points: PyReadonlyArray2<T>,
-) -> PyResult<SimplicesAndNeighbors<'py>> {
+) -> PyResult<TriangulationArrays<'py>> {
     let points = points.as_array();
     if points.ncols() != 3 {
         return Err(PyValueError::new_err("input points must have shape (n, 3)"));
     }
     // See shull_2d_impl for why the input is copied before releasing the GIL.
     let points = points.to_owned();
-    let (tets, nbrs) = py
+    let (tets, nbrs, dups) = py
         .allow_threads(move || {
-            d4::delaunay4d(points.view()).map(|(t, n)| (to_i32_array(t), to_i32_array(n)))
+            d4::delaunay4d(points.view())
+                .map(|(t, n, d)| (to_i32_array(t), to_i32_array(n), to_i32_array(d)))
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok((tets.into_pyarray(py), nbrs.into_pyarray(py)))
+    Ok((
+        tets.into_pyarray(py),
+        nbrs.into_pyarray(py),
+        dups.into_pyarray(py),
+    ))
 }
 
 /// Calculate the S-Hull Delaunay triangulation of a set of 2d points.
@@ -70,15 +84,17 @@ fn shull_3d_impl<'py, T: Copy + Into<f64> + numpy::Element + Send>(
 /// S-hull: a fast sweep-hull routine for Delaunay triangulation by David
 /// Sinclair, http://www.s-hull.org/
 ///
-/// Returns a pair of (n, 3) int32 arrays: vertex indices into the input
-/// array (one counterclockwise triangle per row) and the neighbor triangle
-/// opposite each vertex (-1 on the hull), matching scipy's `simplices` and
-/// `neighbors`.
+/// Returns three int32 arrays: (n, 3) vertex indices into the input array
+/// (one counterclockwise triangle per row), the (n, 3) neighbor triangle
+/// opposite each vertex (-1 on the hull) — matching scipy's `simplices` and
+/// `neighbors` — and an (m, 2) array of `[dropped index, kept index]` rows
+/// for exact duplicate input points (m = 0 when all points are distinct;
+/// the kept index is the first occurrence).
 #[pyfunction]
 pub fn calculate_shull_2d<'py>(
     py: Python<'py>,
     points: PyReadonlyArray2<f64>,
-) -> PyResult<SimplicesAndNeighbors<'py>> {
+) -> PyResult<TriangulationArrays<'py>> {
     shull_2d_impl(py, points)
 }
 
@@ -88,7 +104,7 @@ pub fn calculate_shull_2d<'py>(
 pub fn calculate_shull_2d_f32<'py>(
     py: Python<'py>,
     points: PyReadonlyArray2<f32>,
-) -> PyResult<SimplicesAndNeighbors<'py>> {
+) -> PyResult<TriangulationArrays<'py>> {
     shull_2d_impl(py, points)
 }
 
@@ -100,15 +116,17 @@ pub fn calculate_shull_2d_f32<'py>(
 /// a space-filling curve, and the downward-facing facets are the Delaunay
 /// tetrahedra.
 ///
-/// Returns a pair of (n, 4) int32 arrays: vertex indices into the input
-/// array (one tetrahedron per row) and the neighbor tetrahedron opposite
-/// each vertex (-1 on the hull boundary), matching scipy's `simplices` and
-/// `neighbors`.
+/// Returns three int32 arrays: (n, 4) vertex indices into the input array
+/// (one tetrahedron per row), the (n, 4) neighbor tetrahedron opposite each
+/// vertex (-1 on the hull boundary) — matching scipy's `simplices` and
+/// `neighbors` — and an (m, 2) array of `[dropped index, kept index]` rows
+/// for exact duplicate input points (m = 0 when all points are distinct;
+/// the kept index is the first occurrence).
 #[pyfunction]
 pub fn calculate_shull_3d<'py>(
     py: Python<'py>,
     points: PyReadonlyArray2<f64>,
-) -> PyResult<SimplicesAndNeighbors<'py>> {
+) -> PyResult<TriangulationArrays<'py>> {
     shull_3d_impl(py, points)
 }
 
@@ -119,7 +137,7 @@ pub fn calculate_shull_3d<'py>(
 pub fn calculate_shull_3d_f32<'py>(
     py: Python<'py>,
     points: PyReadonlyArray2<f32>,
-) -> PyResult<SimplicesAndNeighbors<'py>> {
+) -> PyResult<TriangulationArrays<'py>> {
     shull_3d_impl(py, points)
 }
 

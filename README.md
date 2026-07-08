@@ -102,7 +102,9 @@ than scipy's); the rest are computed lazily in numpy and cached:
 - `convex_hull` — facets of the convex hull
 - `vertex_to_simplex` — a simplex containing each vertex
 - `vertex_neighbor_vertices` — CSR `(indptr, indices)` vertex adjacency
-- `coplanar` — points not in the triangulation (dropped exact duplicates)
+- `coplanar` — points not in the triangulation (dropped exact duplicates),
+  mapped to their kept representative; recorded by the Rust core during its
+  dedup, not reconstructed after the fact
 - `transform` — barycentric transforms, same layout as scipy
 - `find_simplex(xi, bruteforce=False, tol=None)` — point location via a
   vectorized visibility walk (brute force as option/fallback)
@@ -122,8 +124,12 @@ Notes (both dimensions):
   keeps the float32 dtype). Coordinates widen to float64 exactly internally,
   so the result is identical to passing `points.astype(np.float64)`. Other
   dtypes are converted to float64.
-- Exact duplicate points are dropped; their indices never appear in the
-  output.
+- Exact duplicate points are dropped, keeping the first occurrence as the
+  representative. scipy/Qhull likewise never includes duplicate indices in
+  `simplices` (though which copy Qhull keeps is arbitrary, while shull's
+  choice is deterministic). Dropped points are reported in `coplanar`
+  (scipy's convention); the raw `calculate_shull_*` functions return the
+  `(dropped, kept)` index pairs as a third array.
 - Degenerate input (too few distinct points, all points collinear in 2D, all
   points coplanar/cospherical in 3D) raises `ValueError` — a full-dimensional
   triangulation does not exist in those cases.
