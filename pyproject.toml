@@ -4,11 +4,11 @@ build-backend = "maturin"
 
 [project]
 name = "shull"
-description = "Fast sweep-hull (S-hull) Delaunay triangulation in 2D and 3D, implemented in Rust"
+description = "Fast sweep-hull (S-hull) Delaunay triangulation, plus alpha shapes (concave hulls), in 2D and 3D, implemented in Rust"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Philipp Schlegel", email = "pms70@cam.ac.uk" }]
-keywords = ["delaunay", "triangulation", "sweep-hull", "s-hull", "computational-geometry", "mesh"]
+keywords = ["delaunay", "triangulation", "sweep-hull", "s-hull", "computational-geometry", "mesh", "alpha-shape", "concave-hull"]
 requires-python = ">=3.10"
 dependencies = ["numpy"]
 classifiers = [
@@ -32,6 +32,9 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 test = ["pytest", "scipy"]
+# `python bench.py --alpha` optionally cross-checks the alpha shapes against
+# the pure-Python alphashape package (it is skipped gracefully if absent).
+bench = ["scipy", "alphashape"]
 
 [project.urls]
 Repository = "https://github.com/schlegelp/shull"

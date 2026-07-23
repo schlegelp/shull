@@ -108,6 +108,60 @@ Notes (both dimensions):
   perturbation of the coordinates), which makes the result robust to clouds
   positioned far from the origin.
 
+## Alpha shapes (concave hull)
+
+An alpha shape is the subcomplex of the Delaunay triangulation that keeps every
+simplex whose circumscribing ball has radius `≤ alpha`. Small `alpha` gives a
+tight, detail-hugging boundary; as `alpha → ∞` the shape fills in to the convex
+hull. It is the principled way to get a *concave* hull / surface — something
+`scipy.spatial` does not provide at all.
+
+Because the shape is just a threshold on per-simplex circumradii, it rides on
+shull's fast Delaunay build: the triangulation is computed once and the
+filtration is a cheap boolean pass. **Requesting an alpha shape adds nothing to
+the Delaunay build's time or memory** — the circumradii are computed in Rust
+lazily, only when asked for, from the finished triangulation.
+
+```python
+>>> import shull, numpy as np
+>>> pts = np.random.default_rng(0).random((100_000, 2))
+>>> a = shull.AlphaShape(pts, alpha=0.05)
+>>> a.boundary          # (nfacet, ndim) int32 boundary facets: the concave hull
+>>> a.simplices         # the simplices filling the shape
+>>> a.measure           # total area (2D) / volume (3D)
+>>> a.at(0.2).boundary  # a looser shape, reusing the same triangulation
+```
+
+`AlphaShape(pts)` with no `alpha` uses `optimal_alpha()` — the smallest `alpha`
+that leaves no point isolated. Everything is also available straight off a
+`Delaunay` (so an existing triangulation is reused for free):
+
+```python
+>>> d = shull.Delaunay(pts)
+>>> d.circumradii         # (nsimplex,) circumradius per simplex, cached
+>>> d.alpha_complex(0.05) # simplex indices with circumradius ≤ alpha
+>>> d.alpha_shape(0.05)   # boundary facets (== convex_hull at alpha=inf)
+```
+
+Benchmark (Apple-silicon laptop, random uniform points, `python bench.py
+--alpha`) against the pure-scipy alternative (`scipy.spatial.Delaunay` +
+circumradius filter) and the [`alphashape`](https://pypi.org/project/alphashape/)
+package:
+
+**2D** (`shull.AlphaShape` vs scipy-DIY vs `alphashape`)
+
+| n | shull | scipy DIY | speedup | alphashape pkg | speedup |
+|-----------|--------|--------|-------|--------|-------|
+| 1 000 | 0.0002 s | 0.002 s | 12× | 0.064 s | 400× |
+| 20 000 | 0.005 s | 0.046 s | 10× | 1.37 s | 290× |
+| 100 000 | 0.028 s | 0.30 s | 11× | — | — |
+| 1 000 000 | 0.42 s | 4.4 s | 10× | — | — |
+
+The scipy-DIY speedup tracks the Delaunay speedup (shull only swaps in the fast
+build and native circumradii); the `alphashape` package builds a shapely union
+per triangle and does not scale past ~10⁴ points. 3D shows the same pattern
+(~4–5× over scipy-DIY, ~50–75× over the package).
+
 ## Use from Rust
 
 The crate is also usable as a plain Rust library: the Python bindings sit
@@ -131,10 +185,16 @@ let pts: Array2<f64> = /* (n, 2) array */;
 let (triangles, neighbors, duplicates) = delaunay2d(pts.view())?;
 // 3D points (n, 3) -> tetrahedra, same return layout:
 let (tetrahedra, neighbors, duplicates) = delaunay4d(pts3.view())?;
+
+// alpha-shape filtration: circumradius of each simplex (2D or 3D), from the
+// already-built triangulation — no re-triangulation, build path untouched.
+let radii = shull::circumradii(pts.view(), triangles.view())?;
 ```
 
 `csr_adjacency` builds the scipy-style `(indptr, indices)` vertex adjacency
-from a simplex array. Degenerate or oversized input is reported as a
+from a simplex array. `circumradii` takes points plus an `(m, 3)`/`(m, 4)`
+int32 simplex array and returns one circumradius per row (infinite for a
+degenerate simplex). Degenerate or oversized input is reported as a
 `DelaunayError` rather than a panic.
 
 ## Parallel builds
@@ -202,6 +262,7 @@ cargo test --features parallel # Rust unit tests (incl. hull invariant checks)
 python -m pytest tests/        # property tests + comparison against scipy
 python bench.py                # benchmark against scipy.spatial.Delaunay
 python bench.py --sweep        # thread scaling of the parallel build
+python bench.py --alpha        # alpha shapes vs scipy-DIY / the alphashape pkg
 ```
 
 Benchmark on an Apple-silicon laptop (random uniform points, release build):

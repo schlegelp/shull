@@ -2,11 +2,11 @@
 name = "shull"
 version = "0.3.0"
 edition = "2021"
-description = "Fast sweep-hull (S-hull) Delaunay triangulation in 2D and 3D"
+description = "Fast sweep-hull (S-hull) Delaunay triangulation, plus alpha shapes (concave hulls), in 2D and 3D"
 license = "GPL-3.0-only"
 repository = "https://github.com/schlegelp/shull"
 readme = "README.md"
-keywords = ["delaunay", "triangulation", "sweep-hull", "geometry", "mesh"]
+keywords = ["delaunay", "triangulation", "sweep-hull", "alpha-shape", "mesh"]
 categories = ["mathematics", "science", "algorithms"]
 # Whitelist for the crates.io package: keeps the Python wrapper sources,
 # pytest suite and stray working files out. maturin adds pyproject.toml and

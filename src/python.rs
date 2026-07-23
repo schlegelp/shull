@@ -6,7 +6,7 @@ use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use crate::{csr_adjacency, d2, d4};
+use crate::{alpha, csr_adjacency, d2, d4};
 
 // int32 to match scipy.spatial.Delaunay's simplices/neighbors dtype. Called
 // inside `detach` so the cast loop runs without the GIL; only the zero-copy
@@ -276,6 +276,70 @@ pub fn calculate_shull_3d_f32<'py>(
     shull_3d_impl(py, points, parallel, progress)
 }
 
+fn circumradii_impl<'py, T: Copy + Into<f64> + numpy::Element + Send + Sync>(
+    py: Python<'py>,
+    points: PyReadonlyArray2<'py, T>,
+    simplices: PyReadonlyArray2<'py, i32>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    // See shull_2d_impl for why the inputs are copied before releasing the GIL.
+    let points = points.as_array().to_owned();
+    let simplices = simplices.as_array().to_owned();
+    let k = simplices.ncols();
+    // Repack the (m, 3)/(m, 4) int32 simplices into the `[u32; K]` row layout
+    // the Rust core takes (matching `delaunay2d`/`delaunay4d` output); done off
+    // the GIL, only on the alpha path, never during the Delaunay build.
+    // Out-of-range or negative indices wrap to a large u32 and are rejected
+    // inside the core.
+    let radii = py.detach(move || match k {
+        3 => {
+            let sv: Vec<[u32; 3]> = simplices
+                .rows()
+                .into_iter()
+                .map(|r| [r[0] as u32, r[1] as u32, r[2] as u32])
+                .collect();
+            alpha::circumradii(points.view(), &sv)
+        }
+        4 => {
+            let sv: Vec<[u32; 4]> = simplices
+                .rows()
+                .into_iter()
+                .map(|r| [r[0] as u32, r[1] as u32, r[2] as u32, r[3] as u32])
+                .collect();
+            alpha::circumradii(points.view(), &sv)
+        }
+        other => Err(format!("simplices must have 3 or 4 columns, got {}", other)),
+    });
+    Ok(radii.map_err(PyValueError::new_err)?.into_pyarray(py))
+}
+
+/// Circumradius of each Delaunay simplex, for alpha-shape filtration.
+///
+/// Takes the `points` (n, 2)/(n, 3) and an (m, 3)/(m, 4) int32 `simplices`
+/// array (as produced by `calculate_shull_2d`/`_3d`) and returns an (m,)
+/// float64 array of circumradii in row order. Computed from the already-built
+/// triangulation — it does not re-triangulate and does not touch the Delaunay
+/// build path. Degenerate simplices get an infinite radius.
+#[pyfunction]
+pub fn circumradii<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray2<'py, f64>,
+    simplices: PyReadonlyArray2<'py, i32>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    circumradii_impl(py, points, simplices)
+}
+
+/// Same as `circumradii` but for float32 coordinates, avoiding the upcast
+/// copy of the input array. Coordinates widen to f64 exactly, so the radii
+/// are identical to converting the points to float64 first.
+#[pyfunction]
+pub fn circumradii_f32<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray2<'py, f32>,
+    simplices: PyReadonlyArray2<'py, i32>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    circumradii_impl(py, points, simplices)
+}
+
 /// scipy-style `vertex_neighbor_vertices` from an (n, k) int32 simplex
 /// array: `(indptr, indices)` CSR arrays (both int32); the neighbors of
 /// vertex v are `indices[indptr[v]:indptr[v + 1]]`, sorted ascending.
@@ -310,5 +374,7 @@ fn shull(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calculate_shull_3d, m)?)?;
     m.add_function(wrap_pyfunction!(calculate_shull_3d_f32, m)?)?;
     m.add_function(wrap_pyfunction!(vertex_neighbor_vertices, m)?)?;
+    m.add_function(wrap_pyfunction!(circumradii, m)?)?;
+    m.add_function(wrap_pyfunction!(circumradii_f32, m)?)?;
     Ok(())
 }

@@ -4,7 +4,7 @@ import numpy as np
 
 from shull import _shull
 
-__all__ = ['Delaunay', 'Delaunay3d']
+__all__ = ['Delaunay', 'Delaunay3d', 'AlphaShape']
 
 
 def _facet_columns(m):
@@ -318,6 +318,54 @@ class Delaunay:
             out[start:start + chunk][ok] = best[ok]
         return out
 
+    @functools.cached_property
+    def circumradii(self):
+        """(nsimplex,) float64 circumradius of each simplex.
+
+        The radius of the ball through a simplex's vertices — the value the
+        alpha-shape filtration thresholds on. Computed in Rust from the
+        finished triangulation (it does not re-triangulate), on first access
+        and cached. Degenerate simplices (which a valid Delaunay build does
+        not produce) would report ``inf``.
+        """
+        calc = (_shull.circumradii_f32 if self.points.dtype == np.float32
+                else _shull.circumradii)
+        return calc(self.points, self.simplices)
+
+    def alpha_complex(self, alpha):
+        """Indices of the simplices in the alpha complex at scale `alpha`.
+
+        Returns the (int32) row indices into `simplices` of every simplex
+        whose circumradius is ``<= alpha``. As ``alpha`` grows the complex
+        fills in from nothing up to the full triangulation (whose boundary is
+        the convex hull), so this is the "solid" concave shape at scale
+        ``alpha``. Pass ``alpha=np.inf`` for the whole triangulation.
+        """
+        return np.nonzero(self.circumradii <= alpha)[0].astype(np.int32)
+
+    def alpha_shape(self, alpha):
+        """Boundary facets of the alpha complex at scale `alpha`.
+
+        Returns an (nfacet, ndim) int32 array of vertex indices — edges in 2D,
+        triangles in 3D — bounding the alpha complex: the concave-hull surface
+        of the point cloud at scale ``alpha``. A facet is on the boundary when
+        one of the two simplices sharing it is in the complex and the other is
+        not (or is outside the triangulation). Interior cavities smaller than
+        ``alpha`` show up as their own boundary loops, exactly as an alpha
+        shape should. At ``alpha=np.inf`` this equals `convex_hull`.
+        """
+        inside = self.circumradii <= alpha
+        nbr = self.neighbors
+        # The facet opposite vertex j is shared with neighbor nbr[:, j]; it
+        # bounds the shape when this simplex is in and the neighbor is out
+        # (missing, or not in the complex). Where nbr == -1 the `inside[nbr]`
+        # gather reads a junk row, but the `nbr == -1` term masks it.
+        nbr_outside = (nbr == -1) | ~inside[nbr]
+        boundary = inside[:, None] & nbr_outside
+        i, j = np.nonzero(boundary)
+        cols = _facet_columns(self.simplices.shape[1])
+        return self.simplices[i[:, None], cols[j]]
+
     def close(self):
         """No-op, for compatibility with scipy.spatial.Delaunay."""
 
@@ -334,3 +382,111 @@ class Delaunay3d(Delaunay):
         if points.ndim != 2 or points.shape[1] != 3:
             raise ValueError("points must have shape (n, 3)")
         super().__init__(points, **kwargs)
+
+
+class AlphaShape:
+    """Alpha shape (concave hull) of a 2D or 3D point cloud.
+
+    An alpha shape is the subcomplex of the Delaunay triangulation keeping
+    every simplex whose circumradius is ``<= alpha``. Small ``alpha`` carves a
+    tight, possibly disconnected shape that hugs the points; as ``alpha`` grows
+    the shape fills in and, in the limit, becomes the convex hull. It is the
+    principled way to get a *concave* hull / surface, which
+    ``scipy.spatial`` does not provide.
+
+    The triangulation is built once (by `shull.Delaunay`, i.e. the same fast
+    sweep-hull kernel) and the filtration is a cheap threshold on the
+    per-simplex circumradii, so changing ``alpha`` on an existing instance via
+    `at` reuses the triangulation.
+
+    Parameters
+    ----------
+    points : (n, 2) or (n, 3) array_like
+        The point cloud. Ignored if `tri` is given.
+    alpha : float, optional
+        The radius scale. If omitted, `optimal_alpha` is used — the smallest
+        ``alpha`` at which every point belongs to the complex (no isolated
+        points).
+    tri : shull.Delaunay, optional
+        A pre-built triangulation to reuse instead of triangulating `points`.
+    parallel, progress :
+        Forwarded to `shull.Delaunay` when it builds the triangulation.
+
+    Attributes
+    ----------
+    tri : shull.Delaunay
+        The underlying triangulation (shared across `alpha` values).
+    alpha : float
+        The radius scale in effect.
+    boundary : (nfacet, ndim) int32
+        Vertex indices of the boundary facets (edges in 2D, triangles in 3D):
+        the concave-hull surface. Same format as `Delaunay.convex_hull`.
+    simplices : (k, ndim+1) int32
+        Vertex-index rows of the simplices filling the shape.
+    measure : float
+        Total area (2D) / volume (3D) of the filled simplices.
+    """
+
+    def __init__(self, points, alpha=None, *, tri=None,
+                 parallel=False, progress=False):
+        if tri is None:
+            tri = Delaunay(points, parallel=parallel, progress=progress)
+        elif not isinstance(tri, Delaunay):
+            raise TypeError("tri must be a shull.Delaunay instance")
+        self.tri = tri
+        self.alpha = self.optimal_alpha() if alpha is None else float(alpha)
+
+    @property
+    def points(self):
+        return self.tri.points
+
+    @property
+    def ndim(self):
+        return self.tri.ndim
+
+    def optimal_alpha(self):
+        """Smallest `alpha` at which every point is in the complex.
+
+        For each point, the smallest circumradius among the simplices
+        containing it is the ``alpha`` at which that point first joins the
+        complex; the largest of those over all points is the smallest
+        ``alpha`` that leaves no point isolated. A common, cheap default that
+        avoids a stray-points shape without jumping to the convex hull.
+        """
+        tri = self.tri
+        r = tri.circumradii
+        s = tri.simplices
+        cover = np.full(tri.npoints, np.inf)
+        np.minimum.at(cover, s.ravel(),
+                      np.repeat(r, s.shape[1]).astype(np.float64))
+        finite = cover[np.isfinite(cover)]
+        return float(finite.max()) if finite.size else 0.0
+
+    def at(self, alpha):
+        """A new `AlphaShape` at a different `alpha`, reusing the triangulation."""
+        return AlphaShape(None, alpha, tri=self.tri)
+
+    @functools.cached_property
+    def boundary(self):
+        return self.tri.alpha_shape(self.alpha)
+
+    @functools.cached_property
+    def _mask(self):
+        return self.tri.circumradii <= self.alpha
+
+    @functools.cached_property
+    def simplices(self):
+        return self.tri.simplices[self._mask]
+
+    @functools.cached_property
+    def measure(self):
+        pts = self.tri._points64
+        s = self.simplices
+        if s.shape[0] == 0:
+            return 0.0
+        d = self.ndim
+        # Edge vectors from vertex 0; measure = |det| / d!.
+        v = pts[s[:, 1:]] - pts[s[:, :1]]
+        dets = np.linalg.det(v)  # batched (k, d, d) determinants
+        fact = 2.0 if d == 2 else 6.0
+        return float(np.abs(dets).sum() / fact)

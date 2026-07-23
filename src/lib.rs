@@ -1,9 +1,11 @@
 use ndarray::ArrayView2;
 
+mod alpha;
 mod d2;
 mod d4;
 mod error;
 
+pub use alpha::circumradii;
 pub use d2::delaunay2d;
 pub use d4::delaunay4d;
 pub use error::DelaunayError;
