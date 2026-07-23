@@ -15,6 +15,34 @@ def _facet_columns(m):
     return np.array([[k for k in range(m) if k != j] for j in range(m)])
 
 
+def _default_progress():
+    """Progress renderer for ``progress=True``: one self-overwriting stderr
+    line through the parallel build's stages, cleared when done."""
+    import sys
+
+    state = {"width": 0}
+
+    def render(stage, done, total):
+        if stage == "blocks" and total:
+            bar = "#" * round(30 * done / total)
+            msg = f"shull [{bar:<30}] blocks {done}/{total}"
+        elif stage in ("crust", "merge"):
+            msg = f"shull [{'#' * 30}] {stage}…"
+        elif stage == "fallback":
+            msg = "shull: finishing with the sequential build…"
+        elif stage == "done":
+            sys.stderr.write("\r" + " " * state["width"] + "\r")
+            sys.stderr.flush()
+            return
+        else:  # unknown stage: future-proofing
+            return
+        state["width"] = max(state["width"], len(msg))
+        sys.stderr.write("\r" + msg.ljust(state["width"]))
+        sys.stderr.flush()
+
+    return render
+
+
 class Delaunay:
     """Delaunay triangulation of 2D or 3D points via sweep-hull (S-hull).
 
@@ -70,12 +98,32 @@ class Delaunay:
     - Degenerate input (too few distinct points, all points collinear in
       2D, all points coplanar/cospherical in 3D) raises ValueError — a
       full-dimensional triangulation does not exist in those cases.
+    - `parallel=True` (an extra keyword scipy does not have) builds the
+      triangulation with multiple threads by partitioning the cloud into
+      spatial blocks, each triangulated by the unchanged sequential kernel
+      and merged under exact-arithmetic consistency checks. The simplex
+      *set* is identical to `parallel=False` for points in general
+      position, but the row order of `simplices` (and of `coplanar`) is
+      unspecified and differs from the sequential build. Exactly
+      cocircular/cospherical inputs either fall back to the sequential
+      build transparently or may resolve degenerate ties differently
+      (still a valid Delaunay triangulation). Only worthwhile for large
+      clouds; inputs below ~100k points run sequentially regardless. The
+      thread count follows rayon's global pool (RAYON_NUM_THREADS).
+    - `progress` (requires `parallel=True`): `True` renders a simple
+      self-overwriting progress line on stderr; alternatively pass a
+      callable receiving `(stage, done, total)` events — `("blocks", done,
+      total)` per finished block, then `("crust", 0, 0)`, `("merge", 0, 0)`
+      and finally `("done", 0, 0)`, with `("fallback", 0, 0)` emitted right
+      before the sequential kernel takes over on degenerate input. Events
+      arrive in order but on worker threads; an exception raised by the
+      callable stops reporting and is re-raised once the build finishes.
     """
 
     furthest_site = False
 
     def __init__(self, points, furthest_site=False, incremental=False,
-                 qhull_options=None):
+                 qhull_options=None, parallel=False, progress=False):
         if furthest_site:
             raise NotImplementedError("furthest_site=True is not supported")
         if incremental:
@@ -84,6 +132,17 @@ class Delaunay:
             raise NotImplementedError(
                 "qhull_options are not supported (shull does not use Qhull)"
             )
+        if progress and not parallel:
+            raise ValueError(
+                "progress reporting requires parallel=True (the sequential "
+                "build has no progress hooks)"
+            )
+        if callable(progress):
+            progress_cb = progress
+        elif progress:
+            progress_cb = _default_progress()
+        else:
+            progress_cb = None
 
         points = np.asarray(points)
         if points.ndim != 2 or points.shape[1] not in (2, 3):
@@ -97,7 +156,8 @@ class Delaunay:
             self.points = points.astype(np.float64, copy=False)
             calculate = (_shull.calculate_shull_2d if points.shape[1] == 2
                          else _shull.calculate_shull_3d)
-        self.simplices, self.neighbors, self._coplanar_pairs = calculate(self.points)
+        self.simplices, self.neighbors, self._coplanar_pairs = calculate(
+            self.points, parallel=bool(parallel), progress=progress_cb)
         if points.shape[1] == 2:
             self.triangles = self.simplices
 

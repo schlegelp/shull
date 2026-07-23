@@ -43,5 +43,5 @@ Issues = "https://github.com/schlegelp/shull/issues"
 # when running pytest from the repository root.
 python-source = "python"
 module-name = "shull._shull"
-features = ["python", "pyo3/extension-module"]
+features = ["python", "parallel", "pyo3/extension-module"]
 exclude = ["1602.04707v1.pdf", "ipyhull.py", "test.py", "winding_test.py"]

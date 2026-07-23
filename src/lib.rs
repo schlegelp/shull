@@ -8,6 +8,15 @@ pub use d2::delaunay2d;
 pub use d4::delaunay4d;
 pub use error::DelaunayError;
 
+#[cfg(feature = "parallel")]
+mod parallel;
+#[cfg(feature = "parallel")]
+pub use parallel::{
+    delaunay2d_par, delaunay2d_par_with_progress, delaunay2d_par_with_stats, delaunay4d_par,
+    delaunay4d_par_with_progress, delaunay4d_par_with_stats, FallbackReason, ParProgress,
+    ParStats,
+};
+
 #[cfg(feature = "python")]
 mod python;
 #[cfg(feature = "python")]

@@ -23,11 +23,21 @@ crate-type = ["cdylib", "rlib"]
 # (no pyo3 build-time Python lookup, no libpython link); maturin turns it
 # on via pyproject.toml when building the wheel.
 python = ["dep:pyo3", "dep:numpy"]
+# Opt-in parallel build (`delaunay2d_par` / `delaunay4d_par`): partitions the
+# cloud into spatial blocks triangulated concurrently with rayon. Off by
+# default so pure-Rust consumers don't pull in rayon; pyproject.toml enables
+# it for every published wheel.
+parallel = ["dep:rayon"]
 
 [dependencies]
 numpy = { version = "0.29", optional = true }
 ndarray = "0.17"
 robust = "1"
+rayon = { version = "1", optional = true }
+
+[[example]]
+name = "profile_parallel"
+required-features = ["parallel"]
 
 [dependencies.pyo3]
 version = "0.29.0"

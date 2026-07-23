@@ -30,8 +30,10 @@ jobs:
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
+      - name: Rust build without features (pure-Rust consumers)
+        run: cargo check --release
       - name: Rust tests
-        run: cargo test --release
+        run: cargo test --release --features parallel
       - name: Build and install wheel
         run: |
           python -m pip install maturin numpy scipy pytest

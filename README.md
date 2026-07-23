@@ -137,12 +137,59 @@ let (tetrahedra, neighbors, duplicates) = delaunay4d(pts3.view())?;
 from a simplex array. Degenerate or oversized input is reported as a
 `DelaunayError` rather than a panic.
 
-## TODOs
-- [x] implementation for the 2d case
-- [x] generalize from 2 to N dimensions: 3D Delaunay (tetrahedra) via 4D sweep-hull
-- [x] improve 2d performance: ~10X faster than scipy's Qhull-based Delaunay
-- [x] improve 3d performance: ~3–5.5X faster than scipy
-- [x] scipy-compatible API: `neighbors`, `convex_hull`, `vertex_neighbor_vertices`, `transform`, `find_simplex`, …
+## Parallel builds
+
+For large point clouds the triangulation can be built on multiple threads:
+
+```python
+d = shull.Delaunay(pts, parallel=True)   # opt-in; default is False
+```
+
+The cloud is partitioned into spatially compact blocks that are triangulated
+concurrently — each by the *unchanged* sequential kernel, on its points plus a
+one-cell halo of neighbors. A per-point certificate (all incident circumballs
+covered by the gathered region, with a rigorously conservative float margin)
+decides which local results are provably part of the global triangulation; the
+uncertain remainder (block borders, the convex hull, outliers) is
+re-triangulated in a single "crust" pass whose output is verified against the
+whole cloud with exact predicates. The merge then cross-checks every seam
+(exact local-Delaunay tests across block boundaries, face counts, boundary
+closure, no missing points) and, if anything is off — typically exactly
+cocircular/cospherical inputs split across blocks — the build transparently
+falls back to the plain sequential kernel. **The parallel path never returns a
+wrong mesh**: for inputs in general position the simplex set is identical to
+the sequential build (only the row order differs and is unspecified);
+degenerate ties are either resolved identically-to-fallback or consistently
+within one block (a valid Delaunay triangulation with different tie-breaks).
+
+Details worth knowing:
+
+- Only worthwhile for large clouds: inputs below ~100k points run
+  sequentially even with `parallel=True`.
+- `progress=True` renders a self-overwriting progress line on stderr;
+  passing a callable instead receives `(stage, done, total)` events
+  (`"blocks"` with a running count, then `"crust"`, `"merge"`, `"done"`,
+  or `"fallback"` right before the sequential kernel takes over) — easy to
+  hook up to tqdm. From Rust: `delaunay2d_par_with_progress` /
+  `delaunay4d_par_with_progress` take a `Fn(ParProgress) + Sync` callback.
+  The sequential build itself reports no progress (it is untouched by the
+  parallel feature).
+- Threads come from rayon's global pool (`RAYON_NUM_THREADS` to control);
+  the *result* is bit-identical for any thread count.
+- Measured on an Apple M3 Max (10 performance + 4 efficiency cores),
+  uniform random points, wall-clock speedup over the sequential build:
+  ~2.8× (3D, 1M points), ~3.2× (3D, 5–10M), ~2.5× (2D, 1M), ~3.4×
+  (2D, 5M) with all 14 threads; ~2.5× (3D, 10M) with 8 threads. The block
+  stage scales with cores until memory bandwidth saturates; the merge adds
+  a fixed ~O(n) overhead, so speedups grow with cloud size.
+- From Rust: enable the off-by-default `parallel` cargo feature and call
+  `delaunay2d_par` / `delaunay4d_par` (same signatures and return values as
+  the sequential functions). `delaunay2d_par_with_stats` /
+  `delaunay4d_par_with_stats` additionally return a `ParStats` with build
+  diagnostics (block count, crust size, per-stage times, and whether — and
+  why — the build fell back to the sequential kernel). The published wheels
+  always enable the feature; pure-Rust consumers who skip it don't pull in
+  rayon.
 
 ## Build
 1. `cd` into directory
@@ -151,9 +198,10 @@ from a simplex array. Degenerate or oversized input is reported as a
 
 ## Test / benchmark
 ```
-cargo test                      # Rust unit tests (incl. hull invariant checks)
+cargo test --features parallel # Rust unit tests (incl. hull invariant checks)
 python -m pytest tests/        # property tests + comparison against scipy
 python bench.py                # benchmark against scipy.spatial.Delaunay
+python bench.py --sweep        # thread scaling of the parallel build
 ```
 
 Benchmark on an Apple-silicon laptop (random uniform points, release build):
